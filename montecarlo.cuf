@@ -1,0 +1,156 @@
+program montecarlo
+    use curand_m
+    use cudafor
+    implicit none
+    
+    ! Declarations, updated using Claude AI from textbook
+    integer, parameter          :: MAX_N = 100000000  ! Maximum number of samples
+    real(8), device             :: deviceData(MAX_N), putValue(MAX_N), callValue(MAX_N)
+    real(8)                     :: S, E, R, sigma, T, Sfinal, call_price, put_price
+    real(8)                     :: meanPut, meanCall, stddevPut, stddevCall, confidence
+    integer(8)                  :: gen, N, seed
+    integer                     :: i, n2, nargs, istat
+    type(cudaEvent)             :: startEvent, stopEvent
+    real                        :: time
+    character(12)               :: arg
+    character(100)              :: input
+
+    ! Initialize CUDA events
+    istat = cudaEventCreate(startEvent)
+    istat = cudaEventCreate(stopEvent)
+
+    ! Get number of samples from command line or use default
+    nargs = command_argument_count()
+    if (nargs == 0) then
+        N = MAX_N
+    else
+        call get_command_argument(1, arg)
+        read(arg, '(i)') N
+        N = min(N, MAX_N)  ! Ensure N doesn't exceed MAX_N
+    end if
+
+    ! Get input parameters from user
+    ! inputs were provided by Claude AI, by prompting for sensible default values
+    write(*, '(A)') "Monte Carlo European Option pricing model (verified against Black Scholes): "
+    write(*, '(A)') "Enter parameters (press Enter for default):"    
+    write(*, '(A)', advance='no') "Initial stock price S (default 100.0): "
+    read(*, '(A)') input
+    if (len_trim(input) == 0) then
+        S = 100.0_8
+    else
+        read(input, *) S
+    end if
+
+    write(*, '(A)', advance='no') "Strike price E (default 100.0): "
+    read(*, '(A)') input
+    if (len_trim(input) == 0) then
+        E = 100.0_8
+    else
+        read(input, *) E
+    end if
+
+    write(*, '(A)', advance='no') "Volatility sigma (default 0.2): "
+    read(*, '(A)') input
+    if (len_trim(input) == 0) then
+        sigma = 0.2_8
+    else
+        read(input, *) sigma
+    end if
+
+    write(*, '(A)', advance='no') "Risk-free rate R (default 0.05): "
+    read(*, '(A)') input
+    if (len_trim(input) == 0) then
+        R = 0.05_8
+    else
+        read(input, *) R
+    end if
+
+    write(*, '(A)', advance='no') "Time to maturity T in years (default 1.0): "
+    read(*, '(A)') input
+    if (len_trim(input) == 0) then
+        T = 1.0_8
+    else
+        read(input, *) T
+    end if
+
+    ! Print information
+    write(*, '(/A,I0,A)') "European option with random numbers in double precision using ", N, " samples:"
+    write(*, '(A,F10.4)') "S                                   =   ", S
+    write(*, '(A,F10.4)') "E                                   =   ", E
+    write(*, '(A,F10.4)') "sigma                               =   ", sigma
+    write(*, '(A,F10.4)') "R                                   =   ", R
+    write(*, '(A,F10.4/)') "T                                   =   ", T
+
+    ! Start timing
+    istat = cudaEventRecord(startEvent, 0)
+
+    ! Create and initialize pseudorandom number generator
+    call curandCreateGenerator(gen, CURAND_RNG_PSEUDO_DEFAULT)
+    seed = 1234
+    call curandSetPseudoRandomGeneratorSeed(gen, seed)
+
+    ! Generate random numbers
+    call curandGenerateNormal(gen, deviceData, N, 0.0_8, 1.0_8)
+
+    ! Initialize mean values
+    meanPut =   0.0_8
+    meanCall =  0.0_8
+
+    ! Compute option values and means
+    !$cuf kernel do <<<*,*>>>
+    do i = 1, N
+        Sfinal = S * exp((R - 0.5_8 * sigma * sigma) * T + sigma * sqrt(T) * deviceData(i))
+        putValue(i) = exp(-R * T) * max(E - Sfinal, 0.0_8)
+        callValue(i) = exp(-R * T) * max(Sfinal - E, 0.0_8)
+        meanPut = meanPut + putValue(i)
+        meanCall = meanCall + callValue(i)
+    end do
+
+    ! Finalize mean values
+    meanPut = meanPut / N
+    meanCall = meanCall / N
+
+    ! Initialize standard deviations
+    stddevPut =     0.0_8
+    stddevCall =    0.0_8
+
+    ! Compute standard deviations
+    !$cuf kernel do <<<*,*>>>
+    do i = 1, N
+        stddevPut = stddevPut + (putValue(i) - meanPut)**2
+        stddevCall = stddevCall + (callValue(i) - meanCall)**2
+    end do
+
+    ! Finalize standard deviations
+    stddevPut = sqrt(stddevPut / (N - 1))
+    stddevCall = sqrt(stddevCall / (N - 1))
+
+    ! Print results
+    write(*, '(A,F23.16)') "Montecarlo value of call option     =  ", meanCall
+    write(*, '(A,F23.16,A,F23.16,A)') "Confidence interval of call option  = [", &
+        meanCall - 1.96_8 * stddevCall / sqrt(real(N, 8)), ", ", &
+        meanCall + 1.96_8 * stddevCall / sqrt(real(N, 8)), "]"
+    write(*,'(A)') " "
+    write(*, '(A,F23.16)') "Montecarlo value of put option      =  ", meanPut
+    write(*, '(A,F23.16,A,F23.16,A)') "Confidence interval of put option   = [", &
+        meanPut - 1.96_8 * stddevPut / sqrt(real(N, 8)), ", ", &
+        meanPut + 1.96_8 * stddevPut / sqrt(real(N, 8)), "]"
+
+    ! Stop timing and print elapsed time
+    istat = cudaEventRecord(stopEvent, 0)
+    istat = cudaEventSynchronize(stopEvent)
+    istat = cudaEventElapsedTime(time, startEvent, stopEvent)
+    write(*, '(A,F10.2,A)') "Elapsed time:                         ", time, " ms"
+
+    ! Clean up
+    call curandDestroyGenerator(gen)
+
+end program montecarlo
+
+! modified from chapter 5 of CUDA Fortran for Scientists and Engineers
+! with assistance modifying the textbook code using Claude Sonnet 3.5 (which was great)
+! I appreciate the added user input code provided by Claude (reduced tedious work for asking for each variable)
+! compiled using: "pgf90 -DDOUBLE -O3 -o montecarlo curand_m.cuf montecarlo.cuf -lcurand"
+! to mirror the textbook suggestion for the original program
+! run: "./montecarlo"
+! command line args: "./montecarlo 500000" should alter the number of iterations
