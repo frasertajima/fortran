@@ -1,0 +1,142 @@
+module mandelbrot_kernel
+    use cudafor
+    implicit none
+  
+    integer, parameter                                  :: dp = kind(1.0d0)
+    integer, parameter                                  :: MAX_ITER = 30
+    
+  contains
+  
+    attributes(global) subroutine mandelbrot_kernel(plot, width, height, x_min, x_max, y_min, y_max)
+      integer, value                                    :: width, height
+      real(dp), value                                   :: x_min, x_max, y_min, y_max
+      integer, dimension(3, width, height), device      :: plot
+      integer                                           :: i, j, iter
+      real(dp)                                          :: x, y, x0, y0, x2, y2
+      real(dp)                                          :: dx, dy
+      
+      i = blockDim%x * (blockIdx%x - 1) + threadIdx%x
+      j = blockDim%y * (blockIdx%y - 1) + threadIdx%y
+      
+      if (i <= width .and. j <= height) then
+        dx = (x_max - x_min) / width
+        dy = (y_max - y_min) / height
+        
+        x0 = x_min + dx * (i - 1)
+        y0 = y_min + dy * (j - 1)
+        
+        x = 0.0_dp
+        y = 0.0_dp
+        
+        do iter = 1, MAX_ITER
+          x2 = x * x
+          y2 = y * y
+          
+          if (x2 + y2 > 4.0_dp) exit
+          
+          y = 2 * x * y + y0
+          x = x2 - y2 + x0
+        end do
+        
+        ! Color mapping (simple RGB scheme)
+        if (iter == MAX_ITER) then
+          plot(:, i, j) = 0  ! Black for points in the set
+        else
+          plot(1, i, j) = mod(iter * 10, 256)  ! Red
+          plot(2, i, j) = mod(iter * 20, 256)  ! Green
+          plot(3, i, j) = mod(iter * 30, 256)  ! Blue
+        end if
+      end if
+    end subroutine mandelbrot_kernel
+  
+end module mandelbrot_kernel
+  
+program main
+    use cudafor
+    use mandelbrot_kernel
+    implicit none
+    
+    integer, parameter                                  :: width = 2048, height = 2048
+    real(dp), parameter                                 :: x_min = -2.0_dp, x_max = 1.0_dp
+    real(dp), parameter                                 :: y_min = -1.5_dp, y_max = 1.5_dp
+    integer, dimension(3, width, height)                :: h_plot
+    integer, dimension(3, width, height), device        :: d_plot
+    type(dim3)                                          :: grid, block
+    integer                                             :: istat, istat_time
+    type(cudaEvent)                                     :: start, stop
+    real(4)                                             :: time
+
+    ! Set up grid and block dimensions
+    block = dim3(16, 16, 1)
+    grid = dim3(ceiling(real(width)/block%x), ceiling(real(height)/block%y), 1)
+    
+    ! start timer
+    istat_time = cudaEventCreate(start)
+    istat_time = cudaEventCreate(stop)
+    istat_time = cudaEventRecord(start, 0)
+
+    ! Launch kernel
+    call mandelbrot_kernel<<<grid, block>>>(d_plot, width, height, x_min, x_max, y_min, y_max)
+    istat = cudaDeviceSynchronize()
+    if (istat /= 0) stop 'kernel execution failed'
+    
+    ! end timer
+    istat_time = cudaEventRecord(stop, 0)
+    istat_time = cudaEventSynchronize(stop)
+    istat_time = cudaEventElapsedTime(time, start, stop)
+    print *, "mandelbrot on GPU: ", time, " (ms)"
+    print *, "height        ", height
+    print *, "width         ", width
+    print *, "iterations  ", MAX_ITER
+
+    ! Copy result back to host
+    h_plot = d_plot
+    
+    ! Save the plot as a PPM file
+    call save_plot(h_plot, width, height, "mandelbrot_color.ppm")
+    
+  contains
+  
+    subroutine save_plot(plot, width, height, filename)
+      integer, intent(in)                                   :: width, height
+      integer, dimension(3, width, height), intent(in)      :: plot
+      character(len=*), intent(in)                          :: filename
+      integer :: i, j, unit
+      
+      ! Open the file
+      open(newunit=unit, file=filename, status='replace', action='write', iostat=istat)
+      if (istat /= 0) then
+        print *, "Error opening file for writing"
+        return
+      end if
+      
+      ! Write PPM header
+      write(unit, '(A)') "P3"
+      write(unit, '(2I6)') width, height
+      write(unit, '(I3)') 255
+      
+      ! Write pixel data
+      do j = 1, height
+        do i = 1, width
+          write(unit, '(3I4)') plot(1,i,j), plot(2,i,j), plot(3,i,j)
+        end do
+      end do
+      
+      ! Close the file
+      close(unit)
+      
+      print *, "Plot saved as ", trim(filename)
+    end subroutine save_plot
+  
+end program main
+
+! Claude Sonnet 3.5 is one of the few LLMs that can do a Mandelbrot plot in color with CUDA Fortran
+! Here are the key changes and explanations:
+
+! In the kernel subroutine, I added the value attribute to scalar arguments and the device attribute to the plot array. 
+! This resolves the device attribute mismatch errors.
+! Removed explicit cudaMalloc and cudaFree calls. In CUDA Fortran, device arrays are automatically allocated and deallocated 
+! when they go in and out of scope.
+! Replaced cudaMemcpy with a simple assignment h_plot = d_plot. CUDA Fortran handles the data transfer automatically.
+! Declared the istat variable explicitly in the main program.
+! Removed the int function, which is not needed in Fortran (it's a C function).
