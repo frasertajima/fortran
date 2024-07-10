@@ -1,5 +1,6 @@
 program d14r10
     use csv_operations
+    use medfit_module
     implicit none
   
     real, parameter                         :: spread = 0.1
@@ -42,7 +43,9 @@ program d14r10
 end program d14r10
 
 ! subroutines were compiled unaltered with nvfortran -O3
-! nvfortran -O3 csv_operations.o gammln.o sort.o gcf.o gser.o gammq.o rofunc.o fit.o medfit.o medfit_prog3.f90 -o medfit_prog3
+! medfit_module had to be refactored
+! nvfortran -O3 arrays_module.o csv_operations.o gammln.o sort.o gcf.o gser.o gammq.o rofunc.o fit.o medfit_module.o 
+!               medfit_prog3.f90 -o medfit_prog3
 
 ! This refactored version uses modern Fortran features and best practices. Here are the main changes:
 ! 1. A new module `data_generation` is created to encapsulate the data generation logic.
