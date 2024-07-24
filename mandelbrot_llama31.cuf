@@ -1,0 +1,118 @@
+module mandelbrot_module
+    use cudafor
+    implicit none
+
+contains
+    attributes(global) subroutine mandelbrot_kernel(minx, maxx, miny, maxy, image, maxiter, width, height)
+        real, intent(in)                                :: minx, maxx, miny, maxy
+        integer, intent(in)                             :: maxiter, width, height
+        integer, dimension(width, height), intent(out)  :: image
+        integer                                         :: x, y, i
+        real                                            :: cx, cy, zx, zy, zx2, zy2
+
+        x = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        y = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+        if (x > width .or. y > height) return
+        cx = minx + (maxx - minx) * real(x - 1) / real(width - 1)
+        cy = miny + (maxy - miny) * real(y - 1) / real(height - 1)
+        zx = 0.0; zy = 0.0; zx2 = 0.0; zy2 = 0.0
+        do i = 1, maxiter
+            zy = 2.0 * zx * zy + cy
+            zx = zx2 - zy2 + cx
+            zx2 = zx * zx
+            zy2 = zy * zy
+            if (zx2 + zy2 > 4.0) then
+                image(x, y) = i
+                return
+            end if
+        end do
+        image(x, y) = maxiter
+    end subroutine mandelbrot_kernel
+end module mandelbrot_module
+
+program mandelbrot_example
+    use mandelbrot_module
+    implicit none
+    integer, parameter                                  :: width = 2048, height = 2048, maxiter = 30
+    real, parameter                                     :: minx = -2.0, maxx = 1.0, miny = -1.5, maxy = 1.5
+    integer, dimension(width, height)                   :: image
+    integer, dimension(:,:), allocatable, device        :: d_image
+    real, device                                        :: d_minx, d_maxx, d_miny, d_maxy
+    integer, device                                     :: d_maxiter, d_width, d_height
+    type(dim3)                                          :: blockSize, gridSize
+    integer                                             :: i, j
+    integer                                             :: istat, istat_time
+    type(cudaEvent)                                     :: start, stop
+    real(4)                                             :: time
+
+
+    ! Allocate device memory
+    allocate(d_image(width, height))
+
+    ! Copy host data to device
+    d_minx = minx
+    d_maxx = maxx
+    d_miny = miny
+    d_maxy = maxy
+    d_maxiter = maxiter
+    d_width = width
+    d_height = height
+
+    ! Define kernel launch configuration
+    blockSize = dim3(16, 16, 1)
+    gridSize = dim3((width + blockSize%x - 1) / blockSize%x, (height + blockSize%y - 1) / blockSize%y, 1)
+
+    ! start timer
+    istat_time = cudaEventCreate(start)
+    istat_time = cudaEventCreate(stop)
+    istat_time = cudaEventRecord(start, 0)
+
+    ! Launch kernel
+    call mandelbrot_kernel<<<gridSize, blockSize>>>(d_minx,    &
+                                                    d_maxx,    &
+                                                    d_miny,    &
+                                                    d_maxy,    &
+                                                    d_image,   &
+                                                    d_maxiter, &
+                                                    d_width,   &
+                                                    d_height)
+    istat = cudaDeviceSynchronize()
+    if (istat /= 0) stop 'kernel execution failed'
+
+    ! end timer
+    istat_time = cudaEventRecord(stop, 0)
+    istat_time = cudaEventSynchronize(stop)
+    istat_time = cudaEventElapsedTime(time, start, stop)
+    print *, "mandelbrot on GPU:  ", time, " (ms)"
+    print *, "height        ", height
+    print *, "width         ", width
+    print *, "iterations  ", maxiter
+
+
+    ! Copy data back to host
+    image = d_image
+
+    ! Save image as PPM file
+    open(unit=10, file='mandelbrot_llama31.ppm', status='replace')
+    write(10, '(A)') 'P3'
+    write(10, '(I4, 1X, I4)') width, height
+    write(10, '(I3)') 255
+    do j = 1, height
+        do i = 1, width
+            if (image(i, j) == maxiter) then
+                write(10, '(I3, 1X, I3, 1X, I3, 1X)', advance='no') 0, 0, 0
+            else
+                write(10, '(I3, 1X, I3, 1X, I3, 1X)', advance='no') &
+                    mod(image(i, j) * 8, 256), &
+                    mod(image(i, j) * 16, 256), &
+                    mod(image(i, j) * 32, 256)
+            end if
+        end do
+        write(10, *)
+    end do
+    close(10)
+    deallocate(d_image)
+end program mandelbrot_example
+! llama3.1 can also do this properly with only 2 tries
+! just needed host/device correction
+! llama3.1 executes in 0.3 ms vs 8.8 ms for Claude using the same parameters
