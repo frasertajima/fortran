@@ -1,0 +1,167 @@
+module radix_sort
+  use cudafor
+  implicit none
+
+  ! Constants
+  integer, parameter :: RADIX = 256
+  integer, parameter :: NUM_BITS = 8
+  integer, parameter :: NUM_BUCKETS = RADIX
+
+contains
+
+  ! Kernel to count digits
+  attributes(global) subroutine count_digits(d_data, d_buckets, n_val, bit_shift_val)
+    implicit none
+    integer, device                 :: d_data(*)
+    integer, device                 :: d_buckets(*)
+    integer, value                  :: n_val
+    integer, value                  :: bit_shift_val
+    integer                         :: i, digit, tid, stride
+    integer                         :: old_value
+
+    tid = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+    stride = blockDim%x * gridDim%x
+
+    do i = tid, n_val, stride
+      digit = IAND(ISHFT(d_data(i), -bit_shift_val), RADIX-1) + 1
+      old_value = atomicAdd(d_buckets(digit), 1)
+    end do
+  end subroutine count_digits
+
+  ! Kernel to reorder data
+  attributes(global) subroutine reorder_data(d_data, d_temp, d_offsets, n_val, bit_shift_val)
+    implicit none
+    integer, device                 :: d_data(*)
+    integer, device                 :: d_temp(*)
+    integer, device                 :: d_offsets(*)
+    integer, value                  :: n_val
+    integer, value                  :: bit_shift_val
+    integer                         :: i, digit, pos, tid, stride
+
+    tid = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+    stride = blockDim%x * gridDim%x
+
+    do i = tid, n_val, stride
+      digit = IAND(ISHFT(d_data(i), -bit_shift_val), RADIX-1) + 1
+      pos = atomicAdd(d_offsets(digit), 1)
+      d_temp(pos) = d_data(i)
+    end do
+  end subroutine reorder_data
+
+  ! Kernel to copy array
+  attributes(global) subroutine copy_array(dst, src, n_val)
+    implicit none
+    integer, device                 :: dst(*)
+    integer, device                 :: src(*)
+    integer, value                  :: n_val
+    integer                         :: i, tid, stride
+
+    tid = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+    stride = blockDim%x * gridDim%x
+
+    do i = tid, n_val, stride
+      dst(i) = src(i)
+    end do
+  end subroutine copy_array
+
+  ! Radix sort subroutine
+  subroutine radix_sort(d_data, n)
+    use cudafor
+    implicit none
+    integer, intent(in)             :: n
+    integer, device                 :: d_data(n)
+    integer                         :: num_digits, i, j
+    integer, device, allocatable    :: d_buckets(:), d_offsets(:), d_temp(:)
+    integer, allocatable            :: h_buckets(:), h_offsets(:), h_data(:)
+    integer                         :: temp
+    type(dim3)                      :: grid, block
+    integer                         :: istat
+
+    ! Allocate host memory
+    allocate(h_buckets(NUM_BUCKETS), h_offsets(NUM_BUCKETS), h_data(n), stat=istat)
+    if (istat /= 0) then
+      write(*,*) 'Host memory allocation failed'
+      return
+    end if
+
+    ! Allocate device memory
+    allocate(d_buckets(NUM_BUCKETS), d_offsets(NUM_BUCKETS), d_temp(n), stat=istat)
+    if (istat /= 0) then
+      write(*,*) 'Device memory allocation failed'
+      return
+    end if
+
+    ! Copy initial data to host
+    h_data = d_data
+
+    num_digits = (BIT_SIZE(n) + NUM_BITS - 1) / NUM_BITS
+    block = dim3(256, 1, 1)
+    grid = dim3(min((n + block%x - 1) / block%x, 65535), 1, 1)
+
+    do i = 0, num_digits - 1
+      write(*,*) 'Processing digit:', i
+
+      ! Reset buckets
+      h_buckets = 0
+      d_buckets = h_buckets
+
+      ! Count digits
+      call count_digits<<<grid, block>>>(d_data, d_buckets, n, i * NUM_BITS)
+      istat = cudaDeviceSynchronize()
+      if (istat /= cudaSuccess) then
+        write(*,*) 'Error after count_digits:', cudaGetErrorString(istat)
+        return
+      end if
+
+      ! Copy bucket counts to host
+      h_buckets = d_buckets
+
+      ! write(*,*) 'Bucket counts:'
+      ! write(*,*) h_buckets
+
+      ! Compute prefix sum for offsets on host
+      h_offsets(1) = 0
+      do j = 2, NUM_BUCKETS
+        h_offsets(j) = h_offsets(j-1) + h_buckets(j-1)
+      end do
+
+      ! Fortran vs C code error:
+      ! Add one to the offsets to account for the zero-based indexing
+      do j = 1, NUM_BUCKETS
+        h_offsets(j) = h_offsets(j) + 1
+      end do
+
+      ! Copy offsets to device
+      d_offsets = h_offsets
+
+      ! Reorder data
+      call reorder_data<<<grid, block>>>(d_data, d_temp, d_offsets, n, i * NUM_BITS)
+      istat = cudaDeviceSynchronize()
+      if (istat /= cudaSuccess) then
+        write(*,*) 'Error after reorder_data:', cudaGetErrorString(istat)
+        return
+      end if
+
+      ! Copy reordered data to host for verification
+      h_data = d_temp
+
+      ! write(*,*) 'Reordered data:'
+      ! write(*,*) h_data
+
+      ! Copy reordered data back to d_data
+      d_data = d_temp
+    end do
+
+    ! Copy final result to host
+    h_data = d_data
+
+    ! write(*,*) 'Final sorted data:'
+    ! write(*,*) h_data
+
+    deallocate(d_buckets, d_offsets, d_temp)
+    deallocate(h_buckets, h_offsets, h_data)
+  end subroutine radix_sort
+end module radix_sort
+! after 2 days and over 10 attempts, it finally works
+! simplified memory copy to avoid CUDAmemcpy as that was causing errors
+! also had to rescale to account for 0 indexing in C vs Fortran

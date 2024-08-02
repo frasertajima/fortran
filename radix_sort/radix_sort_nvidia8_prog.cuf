@@ -1,0 +1,65 @@
+program main
+  use cudafor
+  use radix_sort
+  implicit none
+
+  integer, parameter                :: N = 100
+  integer                           :: i, j, istat
+  integer, device, allocatable      :: d_data(:)
+  integer, allocatable              :: h_data(:)
+
+  ! Allocate host and device arrays
+  allocate(h_data(N), stat=istat)
+  if (istat /= 0) then
+    write(*,*) 'Host memory allocation failed'
+    stop
+  end if
+
+  allocate(d_data(N), stat=istat)
+  if (istat /= 0) then
+    write(*,*) 'Device memory allocation failed'
+    stop
+  end if
+
+  ! Initialize data
+  open (unit=5, file='tarray.dat', status='old', action='read', iostat=istat)
+  if (istat /= 0) then
+    write(*,*) 'Error opening input file'
+    stop
+  end if
+  read (5, *, iostat=istat) h_data
+  if (istat /= 0) then
+    write(*,*) 'Error reading input file'
+    stop
+  end if
+  close (5)
+
+  ! Print original array
+  write (*, *) 'Original array:'
+  do i = 1, 10
+    write (*, '(1x, 10i6)') (h_data(10*(i-1)+j), j=1, 10)
+  end do
+
+  ! Copy data to device
+  ! write (*,*) 'Copying data to device'
+  d_data = h_data
+
+  ! Sort data
+  call radix_sort(d_data, N)
+
+  ! Copy sorted data to host
+  h_data = d_data
+
+  ! Print sorted data
+  write (*, *) 'Sorted array:'
+  do i = 1, 10
+    write (*, '(1x, 10i6)') (h_data(10*(i-1)+j), j=1, 10)
+  end do
+
+  ! Deallocate memory
+  deallocate(h_data)
+  deallocate(d_data)
+
+end program main
+! may need to be more flexible to handle more than 100 numbers in the data file
+! switched from CUDAmemcpy to assignment (might be slower but it avoids crashes)
