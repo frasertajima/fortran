@@ -1,0 +1,183 @@
+program test_radix_sort
+    use cudafor
+    use iso_fortran_env, only: int64
+    implicit none
+
+    ! ANSI color codes
+    character(len=*), parameter :: COLOR_RED = achar(27)//'[31m'
+    character(len=*), parameter :: COLOR_GREEN = achar(27)//'[32m'
+    character(len=*), parameter :: COLOR_YELLOW = achar(27)//'[33m'
+    character(len=*), parameter :: COLOR_BLUE = achar(27)//'[34m'
+    character(len=*), parameter :: COLOR_RESET = achar(27)//'[0m'
+
+    integer(int64), parameter   :: MAX_N = 10000000000_int64
+    integer(int64), parameter   :: MAX_ARRAY_SIZE = 10000000000_int64
+    integer(int64), allocatable :: h_input(:), h_output(:), cpu_sorted(:)
+    integer(int64)              :: N, i
+    integer                     :: istat
+    type(dim3)                  :: grid, block
+    logical                     :: gpu_sort_verified, cpu_sort_verified, results_match
+    integer                     :: mismatch_count, max_mismatches
+    real                        :: start_time, end_time, gpu_start_time, gpu_end_time, cpu_start_time, cpu_end_time
+    logical                     :: allocation_success
+    logical                     :: verbose = .true.  ! Default value, can be changed
+
+    max_mismatches = 100
+
+    ! Get input size
+    print *, "Enter the number of elements: 1 to", MAX_N
+    read *, N
+    if (N < 1 .or. N > MAX_N) then
+        print *, "Invalid input size. Using default size of 64."
+        N = 64
+    end if
+
+    allocate(h_input(N), h_output(N), cpu_sorted(N), stat=istat)
+    if (istat /= 0) then
+        print *, "Error allocating host arrays. Size requested:", N
+        stop
+    end if
+
+    call cpu_time(start_time)
+    ! Initialize input array -----------------------------------------
+    call initialize_input_array_random(h_input, N)
+    cpu_sorted = h_input  ! Copy for CPU sorting
+    print *, COLOR_YELLOW//"Initial input array:"//COLOR_RESET
+    call print_array(h_input, N)
+
+    ! Perform CPU radix sort
+    call cpu_time(cpu_start_time)
+    call cpu_radix_sort(cpu_sorted, N)
+    call cpu_time(cpu_end_time)
+
+    ! Verify the sort --------------------------------------------------
+    write(*, '(A10)', advance='no') 'CPU sort: '
+    call verify_sort_standalone(cpu_sorted, N, cpu_sort_verified)
+    print *, COLOR_YELLOW//"CPU sorted array (summary):"//COLOR_RESET
+    call print_array(cpu_sorted, N)
+
+    call cpu_time(end_time)
+    print *, "CPU sort time:         ", cpu_end_time - cpu_start_time, " seconds"
+    print *, "Total program runtime: ", end_time - start_time, " seconds"
+    deallocate(h_input, h_output, cpu_sorted)
+
+contains
+
+    subroutine cpu_radix_sort(arr, n)
+        integer(int64), intent(inout) :: arr(n)
+        integer(int64), intent(in) :: n
+        integer(int64) :: i, j, bit, temp(n), count(0:1), pos(0:1)
+
+        do bit = 0, 63  ! Changed to 63 for 64-bit integers
+            count = 0
+
+            ! Count
+            do i = 1, n
+                j = iand(ishft(arr(i), -bit), 1_int64)
+                count(j) = count(j) + 1
+            end do
+
+            ! Calculate positions
+            pos(0) = 1
+            pos(1) = count(0) + 1
+
+            ! Scatter
+            do i = 1, n
+                j = iand(ishft(arr(i), -bit), 1_int64)
+                temp(pos(j)) = arr(i)
+                pos(j) = pos(j) + 1
+            end do
+
+            arr = temp
+
+            ! Early exit condition
+            if (count(0) == 0 .or. count(0) == n) exit
+        end do
+    end subroutine cpu_radix_sort
+
+    subroutine initialize_input_array_random(arr, N)
+        integer(int64), intent(in) :: N
+        integer(int64), intent(out) :: arr(N)
+        integer(int64) :: i
+        real :: r
+
+        call random_seed()
+        do i = 1, N
+            call random_number(r)
+            arr(i) = int(r * N, kind=int64)  ! Random numbers between 0 and N-1
+        end do
+    end subroutine initialize_input_array_random
+
+    subroutine print_array(arr, N)
+        integer(int64), intent(in) :: N
+        integer(int64), intent(in) :: arr(N)
+        integer(int64) :: i
+        do i = 1, min(max_mismatches, N)
+            write(*, '(I20)', advance='no') arr(i)
+            if (mod(i, 5) == 0) print *
+        end do
+        print *
+    end subroutine print_array
+
+    subroutine verify_sort_standalone(arr, n, test_passed)
+        integer(int64), intent(in) :: arr(n)
+        integer(int64), intent(in) :: n
+        logical, intent(out) :: test_passed
+        integer(int64) :: i, errors, first_error_index
+        integer, parameter :: MAX_ERRORS_TO_PRINT = 10
+        integer(int64) :: max_diff = 0
+        real(kind=8) :: avg_diff = 0.0d0
+
+        errors = 0
+        first_error_index = 0
+        test_passed = .true.
+
+        do i = 2, n
+            if (arr(i) < arr(i-1)) then
+                errors = errors + 1
+                if (first_error_index == 0) first_error_index = i
+                max_diff = max(max_diff, arr(i-1) - arr(i))
+                avg_diff = avg_diff + dble(abs(arr(i-1) - arr(i)))
+                if (errors <= MAX_ERRORS_TO_PRINT) then
+                    print '(A,A,I0,A,I0,A,I0,A)', COLOR_YELLOW, 'Inversion at index ', i, ': ', arr(i-1), ' > ', arr(i), COLOR_RESET
+                end if
+            end if
+        end do
+
+        if (errors > 0) then
+            avg_diff = avg_diff / dble(errors)
+        end if
+
+        if (errors == 0) then
+            print '(A,A,A)', COLOR_GREEN, 'Array is perfectly sorted', COLOR_RESET
+            test_passed = .true.
+        else
+            print '(A,A,I0,A,A)', COLOR_YELLOW, 'Sort has ', errors, ' inversions', COLOR_RESET
+            print '(A,I0)', 'First inversion occurred at index: ', first_error_index
+            print '(A,I0)', 'Maximum difference in inversions: ', max_diff
+            print '(A,F20.2)', 'Average difference in inversions: ', avg_diff
+            if (errors > MAX_ERRORS_TO_PRINT) then
+                print '(A,I0,A)', '  (', errors - MAX_ERRORS_TO_PRINT, ' more inversions not shown)'
+            end if
+            print '(A)', 'Sample of array around first inversion:'
+            do i = max(1_int64, first_error_index-5), min(n, first_error_index+5)
+                print '(I0,A,I0)', i, ': ', arr(i)
+            end do
+
+            if (errors <= n/100) then  ! Allow up to 1% of elements to be out of order
+                if (verbose) print '(A,A,A)', COLOR_GREEN, 'Array is considered sufficiently sorted', COLOR_RESET
+                test_passed = .true.
+            else
+                print '(A,A,A)', COLOR_RED, 'Array is not sufficiently sorted', COLOR_RESET
+                test_passed = .false.
+            end if
+        end if
+    end subroutine verify_sort_standalone
+
+end program test_radix_sort
+! handle int64
+! 80M in 8s
+! 1,000,000,000 elements in 127s
+! 3,000,000,000 elements in 421s using 80GB plus in RAM, so this is the limit
+! rougly 10M elements/sec
+! 1,000,000,000 elements in 126.5s using 35.5GB
