@@ -11,3 +11,4 @@ examples while I learn Fortran:
 8. gauss-jordan (folder): https://felixquinihildebet.wordpress.com/2024/07/19/solving-linear-equations-with-gauss-jordan-elimination-in-fortran/
 9. replace_hard_line_breaks.f90: replaces hard line breaks created by llama3.1 when proofreading text with spaces for ease of editing. Asks for input markdown file name and output markdown file name.
 10. replace_clipboard_linebreaks.f90: replaces the linux system clipboard text instead of a markdown file; this should make it easier: you copy the proofread output from llama3.1, run `./replace_clipboard_linebreaks` and then paste the clipboard into Obsidian or another editor (without needing to save the proofread text into a file and copy the processed text back).
+11. cuda_device_query: small CUDA utility to display your GPU CUDA capabilities (useful for fitting programs to your GPU's abilities).
