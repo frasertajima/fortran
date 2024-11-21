@@ -1,0 +1,35 @@
+module cuda_module
+  use cudafor
+  implicit none
+
+contains
+  subroutine print_device_info()
+    type(cudaDeviceProp) :: prop
+    integer :: deviceCount, device, istat
+
+    istat = cudaGetDeviceCount(deviceCount)
+
+    do device = 0, deviceCount - 1
+      istat = cudaGetDeviceProperties(prop, device)
+
+      print '(A,I0)', "Device Number: ", device
+      print '(A,A)',  "  Device name:                   ", trim(prop%name)
+      print '(A,I0,A,I0)', "  Compute Capability:            ", prop%major, ".", prop%minor
+      print '(A,I0,A)', "  Total Global Memory:           ", prop%totalGlobalMem, " bytes"
+      print '(A,I0)', "  Max Threads per Block:         ", prop%maxThreadsPerBlock
+      print '(A,I0,A,I0,A,I0,A)', "  Max Grid Size:                 (", prop%maxGridSize(1), ", ", &
+               prop%maxGridSize(2), ", ", prop%maxGridSize(3), ")"
+      print '(A,I0)', "  Warp Size:                     ", prop%warpSize
+      print '(A,I0,A)', "  Max Shared Memory per Block:   ", prop%sharedMemPerBlock, " bytes"
+      print '(A,I0)', "  Number of Multiprocessors:     ", prop%multiProcessorCount
+      print *
+    end do
+  end subroutine print_device_info
+end module cuda_module
+
+program device_info
+  use cuda_module
+  implicit none
+
+  call print_device_info()
+end program device_info
