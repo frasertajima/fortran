@@ -1,0 +1,1 @@
+CUDA Fortran matrix multiplication is hitting 3TFLOPS when machine learning libraries are less than 250GFLOPS. I am currently checking to see if I make a horrible mistake.
