@@ -1,0 +1,363 @@
+module matrix_mul
+  use cudafor
+  implicit none
+
+  type :: gpu_params
+    character(len=64)         :: device_name
+    integer                   :: major, minor
+    integer                   :: sm_count
+    integer                   :: max_threads_per_sm
+    integer                   :: shared_mem_per_block
+  end type gpu_params
+
+contains
+
+  attributes(global) subroutine MatrixMulKernel(A, B, C, M, N, K, TILE_DIM, BLOCK_SIZE)
+    implicit none
+    real(8), device           :: A(M,K), B(K,N), C(M,N)
+    integer, value            :: M, N, K, TILE_DIM, BLOCK_SIZE
+
+    ! Thread block parameters
+    integer, parameter        :: THREAD_ITEMS_PER_THREAD = 4
+
+    ! Shared memory tiles - using float instead of double to reduce shared memory usage
+    real(4), shared           :: As0(0:63, 0:63), As1(0:63, 0:63)
+    real(4), shared           :: Bs0(0:63, 0:63), Bs1(0:63, 0:63)
+
+    ! Thread-local storage for better register reuse
+    real(8)                   :: Csub(THREAD_ITEMS_PER_THREAD, THREAD_ITEMS_PER_THREAD)
+    real(8)                   :: Areg(THREAD_ITEMS_PER_THREAD), Breg(THREAD_ITEMS_PER_THREAD)
+
+    ! Thread and block indices
+    integer                   :: tx, ty, bx, by
+    integer                   :: row, col, kk, tile
+    integer                   :: curr_buff, next_buff
+    integer                   :: i, j
+
+    ! Get thread and block indices
+    tx = threadidx%x - 1
+    ty = threadidx%y - 1
+    bx = (blockidx%x - 1) * TILE_DIM
+    by = (blockidx%y - 1) * TILE_DIM
+
+    ! Calculate global row and column indices
+    row = by + ty
+    col = bx + tx
+
+    ! Initialize Csub to zero
+    do j = 1, THREAD_ITEMS_PER_THREAD
+      do i = 1, THREAD_ITEMS_PER_THREAD
+        Csub(i,j) = 0.0d0
+      end do
+    end do
+
+    curr_buff = 0
+
+    ! Load first tile into shared memory buffer 0
+    if (row < M .and. tx < K) then
+      As0(ty,tx) = real(A(row, tx), 4)
+    else
+      As0(ty,tx) = 0.0
+    end if
+
+    if (col < N .and. ty < K) then
+      Bs0(ty,tx) = real(B(ty, col), 4)
+    else
+      Bs0(ty,tx) = 0.0
+    end if
+
+    call syncthreads()
+
+    ! Main loop over tiles
+    do tile = 0, (K-1)/TILE_DIM
+      ! Load next tile into next buffer while computing on current buffer
+      next_buff = 1 - curr_buff
+
+      ! Load next tile of A into shared memory
+      if (row < M .and. (tile*TILE_DIM + tx) < K) then
+        if (curr_buff == 0) then
+          As1(ty,tx) = real(A(row, tile*TILE_DIM + tx), 4)
+        else
+          As0(ty,tx) = real(A(row, tile*TILE_DIM + tx), 4)
+        end if
+      else
+        if (curr_buff == 0) then
+          As1(ty,tx) = 0.0
+        else
+          As0(ty,tx) = 0.0
+        end if
+      end if
+
+      ! Load next tile of B into shared memory
+      if (col < N .and. (tile*TILE_DIM + ty) < K) then
+        if (curr_buff == 0) then
+          Bs1(ty,tx) = real(B(tile*TILE_DIM + ty, col), 4)
+        else
+          Bs0(ty,tx) = real(B(tile*TILE_DIM + ty, col), 4)
+        end if
+      else
+        if (curr_buff == 0) then
+          Bs1(ty,tx) = 0.0
+        else
+          Bs0(ty,tx) = 0.0
+        end if
+      end if
+
+      ! Compute using current buffer while loading completes
+      if (curr_buff == 0) then
+        do kk = 0, TILE_DIM-1
+          ! Load values into registers
+          do i = 1, THREAD_ITEMS_PER_THREAD
+            Areg(i) = real(As0(ty+i-1,kk), 8)
+            Breg(i) = real(Bs0(kk,tx+i-1), 8)
+          end do
+
+          ! Compute outer product
+          do j = 1, THREAD_ITEMS_PER_THREAD
+            do i = 1, THREAD_ITEMS_PER_THREAD
+              Csub(i,j) = Csub(i,j) + Areg(i) * Breg(j)
+            end do
+          end do
+        end do
+      else
+        do kk = 0, TILE_DIM-1
+          ! Load values into registers
+          do i = 1, THREAD_ITEMS_PER_THREAD
+            Areg(i) = real(As1(ty+i-1,kk), 8)
+            Breg(i) = real(Bs1(kk,tx+i-1), 8)
+          end do
+
+          ! Compute outer product
+          do j = 1, THREAD_ITEMS_PER_THREAD
+            do i = 1, THREAD_ITEMS_PER_THREAD
+              Csub(i,j) = Csub(i,j) + Areg(i) * Breg(j)
+            end do
+          end do
+        end do
+      end if
+
+      ! Switch buffers
+      curr_buff = next_buff
+
+      ! Synchronize before next iteration
+      call syncthreads()
+    end do
+
+    ! Write results to global memory
+    do j = 1, THREAD_ITEMS_PER_THREAD
+      do i = 1, THREAD_ITEMS_PER_THREAD
+        if ((row+i-1) < M .and. (col+j-1) < N) then
+          C(row+i-1,col+j-1) = Csub(i,j)
+        end if
+      end do
+    end do
+  end subroutine MatrixMulKernel
+
+  subroutine get_optimal_params(params, tile_dim, block_size)
+    type(gpu_params), intent(out)   :: params
+    integer, intent(out)            :: tile_dim, block_size
+    type(cudaDeviceProp)            :: prop
+    integer                         :: istat
+
+    ! Get device properties
+    istat = cudaGetDeviceProperties(prop, 0)
+
+    ! Store device parameters
+    params%device_name = prop%name
+    params%major = prop%major
+    params%minor = prop%minor
+    params%sm_count = prop%multiProcessorCount
+    params%max_threads_per_sm = prop%maxThreadsPerMultiProcessor
+    params%shared_mem_per_block = prop%sharedMemPerBlock
+
+    ! Set optimal parameters based on device capabilities
+    tile_dim = 64  ! This seems to work well for most cases
+    block_size = 16  ! This gives us 16x16 = 256 threads per block
+  end subroutine get_optimal_params
+
+end module matrix_mul
+
+program main
+  use matrix_mul  ! For custom kernel
+  use thrust      ! For Thrust version
+  use cudafor
+  implicit none
+
+  integer, parameter                              :: matrix_size = 5120
+  integer, parameter                              :: M = matrix_size, N = matrix_size, K = matrix_size
+  integer, parameter                              :: NUM_RUNS = 10
+  integer, parameter                              :: NUM_WARMUP = 5
+
+  real(8), allocatable, dimension(:,:)            :: A, B, C
+  real(8), device, allocatable, dimension(:,:)    :: d_A, d_B, d_C
+  real(8)                                         :: start, finish, exec_time
+  real(8)                                         :: FLOP, FLOPS, GFLOPS, min_gflops, max_gflops, avg_gflops, peak_gflops
+  real(8), dimension(NUM_RUNS)                    :: run_times, gflops_array
+  integer                                         :: istat, run
+  type(cudaEvent)                                 :: startEvent, stopEvent
+  real                                            :: eventTime
+  type(dim3)                                      :: grid, block
+
+  ! GPU parameters
+  type(gpu_params)                                :: params
+  integer                                         :: tile_dim, block_size
+
+  ! Get optimal parameters for current GPU
+  call get_optimal_params(params, tile_dim, block_size)
+
+  ! Print GPU information
+  print *, "GPU Information:"
+  print *, "  Device Name:", trim(params%device_name)
+  write(*,'(A,I13,A,I12)') "  Compute Capability: ", params%major, " .", params%minor
+  write(*,'(A,I12)') "  Number of SMs:        ", params%sm_count
+  write(*,'(A,I12)') "  Max Threads per SM:     ", params%max_threads_per_sm
+  write(*,'(A,I12,A)') "  Shared Memory per Block: ", params%shared_mem_per_block, " bytes"
+  write(*,'(A,I12)') "  Selected tile size:   ", tile_dim
+  write(*,'(A,I12)') "  Selected block size:  ", block_size
+
+  ! Allocate and initialize matrices
+  allocate(A(M,K), B(K,N), C(M,N))
+  call random_number(A)
+  call random_number(B)
+  allocate(d_A(M,K), d_B(K,N), d_C(M,N))
+
+  ! Create CUDA events
+  istat = cudaEventCreate(startEvent)
+  istat = cudaEventCreate(stopEvent)
+
+  ! Set up execution configuration for custom kernel
+  block = dim3(block_size, block_size, 1)
+  grid = dim3((M-1)/tile_dim + 1, (N-1)/tile_dim + 1, 1)
+
+
+
+
+  ! THRUST VERSION TIMING RUNS -------------------------------------------------------
+  print *, ""
+  print *, "Performing Thrust timing runs..."
+  ! Print matrix dimensions once at the start
+  call thrust_print_matrix_info(M, N, K)
+
+  ! Test Thrust functionality first
+  call thrust_test()
+  print *, "Thrust test completed successfully"
+
+  do run = 1, NUM_RUNS
+    ! Record start time
+    istat = cudaEventRecord(startEvent, 0)
+
+    ! Copy input matrices to device
+    d_A = A
+    d_B = B
+
+    ! Launch Thrust kernel
+    call thrust_matrix_multiply(d_A, d_B, d_C, M, N, K)
+
+    ! Copy result back
+    C = d_C
+
+    ! Record stop time and synchronize
+    istat = cudaEventRecord(stopEvent, 0)
+    istat = cudaEventSynchronize(stopEvent)
+
+    ! Get timing
+    istat = cudaEventElapsedTime(eventTime, startEvent, stopEvent)
+    exec_time = eventTime / 1000.0d0
+
+    ! Calculate GFLOPS
+    FLOP = 2.0d0 * real(M) * real(N) * real(K)
+    GFLOPS = (FLOP / 1.0d9) / exec_time
+    gflops_array(run) = GFLOPS
+
+    print *, "Thrust Run", run, ":", GFLOPS, "GFLOPS"
+  end do
+
+  ! Calculate statistics for Thrust version
+  min_gflops = minval(gflops_array)
+  max_gflops = maxval(gflops_array)
+  avg_gflops = sum(gflops_array) / real(NUM_RUNS)
+  peak_gflops = real(params%sm_count) * 128.0d0 * (1.35d3 / 1.0d3)
+
+  ! Print Thrust performance results
+  print *, ""
+  print *, "Performance Results for Thrust (", NUM_RUNS, "runs ):"
+  write(*,'(A,F12.2,A)') "  Minimum: ", min_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Maximum: ", max_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Average: ", avg_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Std Dev: ", &
+      sqrt(sum((gflops_array - avg_gflops)**2) / real(NUM_RUNS)), " GFLOPS"
+  print *, ""
+  print *, "GPU Utilization (Thrust):"
+  write(*,'(A,F12.2,A)') "  Peak Theoretical: ", peak_gflops, " GFLOPS"
+  write(*,'(A,F8.2,A)') "  Average Achieved:   ", (avg_gflops / peak_gflops) * 100.0d0, "%"
+  write(*,'(A,F8.2,A)') "  Best Achieved:      ", (max_gflops / peak_gflops) * 100.0d0, "%"
+
+
+  ! CUSTOM KERNEL TIMING RUNS -------------------------------------------------------
+  print *, "Performing Custom Kernel warmup runs..."
+  do run = 1, NUM_WARMUP
+    call MatrixMulKernel<<<grid, block>>>(d_A, d_B, d_C, M, N, K, tile_dim, block_size)
+  end do
+  istat = cudaDeviceSynchronize()
+
+  print *, "Performing Custom Kernel timing runs..."
+  do run = 1, NUM_RUNS
+    ! Record start time
+    istat = cudaEventRecord(startEvent, 0)
+
+    ! Copy input matrices to device
+    d_A = A
+    d_B = B
+
+    ! Launch custom kernel
+    call MatrixMulKernel<<<grid, block>>>(d_A, d_B, d_C, M, N, K, tile_dim, block_size)
+
+    ! Copy result back
+    C = d_C
+
+    ! Record stop time and synchronize
+    istat = cudaEventRecord(stopEvent, 0)
+    istat = cudaEventSynchronize(stopEvent)
+
+    ! Get timing
+    istat = cudaEventElapsedTime(eventTime, startEvent, stopEvent)
+    exec_time = eventTime / 1000.0d0
+
+    ! Calculate GFLOPS
+    FLOP = 2.0d0 * real(M) * real(N) * real(K)
+    GFLOPS = (FLOP / 1.0d9) / exec_time
+    gflops_array(run) = GFLOPS
+
+    print *, "Custom Run", run, ":", GFLOPS, "GFLOPS"
+  end do
+
+  ! Calculate statistics for custom kernel
+  min_gflops = minval(gflops_array)
+  max_gflops = maxval(gflops_array)
+  avg_gflops = sum(gflops_array) / real(NUM_RUNS)
+  peak_gflops = real(params%sm_count) * 128.0d0 * (1.35d3 / 1.0d3)
+
+  ! Print custom kernel performance results
+  print *, ""
+  print *, "Performance Results for Custom Kernel (", NUM_RUNS, "runs ):"
+  write(*,'(A,F12.2,A)') "  Minimum: ", min_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Maximum: ", max_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Average: ", avg_gflops, " GFLOPS"
+  write(*,'(A,F12.2,A)') "  Std Dev: ", &
+      sqrt(sum((gflops_array - avg_gflops)**2) / real(NUM_RUNS)), " GFLOPS"
+  print *, ""
+  print *, "GPU Utilization (Custom Kernel):"
+  write(*,'(A,F12.2,A)') "  Peak Theoretical: ", peak_gflops, " GFLOPS"
+  write(*,'(A,F8.2,A)') "  Average Achieved:   ", (avg_gflops / peak_gflops) * 100.0d0, "%"
+  write(*,'(A,F8.2,A)') "  Best Achieved:      ", (max_gflops / peak_gflops) * 100.0d0, "%"
+
+  ! Cleanup
+  istat = cudaEventDestroy(startEvent)
+  istat = cudaEventDestroy(stopEvent)
+  deallocate(A, B, C, d_A, d_B, d_C)
+
+end program main
+! after optimisations, hitting 2,300Gflops (from 350Gflops), 85% of theoretical peak!!
+! nvcc -c thrust.cu -o thrust.C.o --extended-lambda
+! nvfortran -o3 thrust.cuf matrix_multiplication_thrust.cuf thrust.C.o -c++libs -o matrix_multiplication_thrust
+! added comparison with thrust version: thrust is super slow at 66 GFLOPS vs 2,780 GFLOPS on RTX 4060!!
