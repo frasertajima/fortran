@@ -357,7 +357,7 @@ program main
   deallocate(A, B, C, d_A, d_B, d_C)
 
 end program main
-! after optimisations, hitting 2,300Gflops (from 350Gflops), 85% of theoretical peak!!
+! after optimisations, hitting 2,780Gflops (from 350Gflops), 65% of theoretical peak!!
 ! nvcc -c thrust.cu -o thrust.C.o 
 ! nvfortran -o3 thrust.cuf matrix_multiplication_thrust.cuf thrust.C.o -c++libs -o matrix_multiplication_thrust
 ! added comparison with thrust version: thrust is super slow at 66 GFLOPS vs 2,780 GFLOPS on RTX 4060!!
