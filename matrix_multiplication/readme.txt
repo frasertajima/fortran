@@ -5,3 +5,4 @@ To compile thrust libraries and use them in CUDA Fortran:
 3. Compile Fortran with the C++ bindings for thrust:                        `nvfortran -o3 thrust.cuf matrix_multiplication_thrust.cuf thrust.C.o -c++libs -o matrix_multiplication_thrust`
 4. run './matrix_multiplication_thrust`
 GPU load: https://www.threads.net/@mean.absolute.error/post/DEBgHZ6PRvg?xmt=AQGz1SMlWeMwzRhLysxvRQ5DadbrYsnq9f0admE59KRuYA
+Still under testing: don't use as results need to be tested thoroughly.
