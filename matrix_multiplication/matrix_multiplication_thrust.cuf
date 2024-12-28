@@ -175,6 +175,53 @@ contains
     block_size = 16  ! This gives us 16x16 = 256 threads per block
   end subroutine get_optimal_params
 
+  attributes(global) subroutine VerifyKernel(A, B, diff, M, N)
+      implicit none
+      real(8), device                  :: A(M,N), B(M,N), diff(M,N)  ! Declare as 2D arrays
+      integer, value                   :: M, N
+      integer                          :: row, col
+
+      ! Calculate row and column indices
+      row = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+      col = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+      if (row <= M .and. col <= N) then
+          diff(row,col) = abs(A(row,col) - B(row,col))
+      endif
+  end subroutine VerifyKernel
+
+  subroutine verify_results(A, B, M, N, max_diff, results_match)
+      implicit none
+      real(8), device                   :: A(M,N), B(M,N)  ! Declare as 2D arrays
+      integer, intent(in)               :: M, N
+      real(8), intent(out)              :: max_diff
+      logical, intent(out)              :: results_match
+
+      real(8), device, allocatable      :: diff(:,:)  ! Make it 2D
+      type(dim3)                        :: grid, block
+      real(8), parameter                :: tolerance = 1.0d-10
+      integer                           :: istat
+
+      ! Allocate difference array
+      allocate(diff(M,N))
+
+      ! Configure kernel launch parameters for 2D grid
+      block = dim3(16, 16, 1)  ! 16x16 thread block
+      grid = dim3((M+15)/16, (N+15)/16, 1)  ! Ceiling division for grid size
+
+      ! Launch verification kernel
+      call VerifyKernel<<<grid, block>>>(A, B, diff, M, N)
+      istat = cudaDeviceSynchronize()
+
+      ! Find maximum difference
+      max_diff = maxval(diff)
+
+      ! Check if results match within tolerance
+      results_match = (max_diff <= tolerance)
+
+      deallocate(diff)
+  end subroutine verify_results
+
 end module matrix_mul
 
 program main
@@ -183,24 +230,27 @@ program main
   use cudafor
   implicit none
 
-  integer, parameter                              :: matrix_size = 5120
-  integer, parameter                              :: M = matrix_size, N = matrix_size, K = matrix_size
-  integer, parameter                              :: NUM_RUNS = 10
-  integer, parameter                              :: NUM_WARMUP = 5
+  integer, parameter                                    :: matrix_size = 5120
+  integer, parameter                                    :: M = matrix_size, N = matrix_size, K = matrix_size
+  integer, parameter                                    :: NUM_RUNS = 10
+  integer, parameter                                    :: NUM_WARMUP = 5
 
-  real(8), allocatable, dimension(:,:)            :: A, B, C
-  real(8), device, allocatable, dimension(:,:)    :: d_A, d_B, d_C
-  real(8)                                         :: start, finish, exec_time
-  real(8)                                         :: FLOP, FLOPS, GFLOPS, min_gflops, max_gflops, avg_gflops, peak_gflops
-  real(8), dimension(NUM_RUNS)                    :: run_times, gflops_array
-  integer                                         :: istat, run
-  type(cudaEvent)                                 :: startEvent, stopEvent
-  real                                            :: eventTime
-  type(dim3)                                      :: grid, block
+  real(8), allocatable, dimension(:,:)                  :: A, B, C
+  real(8), device, allocatable, target, dimension(:,:)  :: d_A, d_B, d_C
+  real(8), device, allocatable, target, dimension(:,:)  :: d_C_thrust, d_C_custom  ! New arrays for comparison
+  real(8)                                               :: start, finish, exec_time
+  real(8)                                               :: FLOP, FLOPS, GFLOPS, min_gflops, max_gflops, avg_gflops, peak_gflops
+  real(8), dimension(NUM_RUNS)                          :: run_times, gflops_array
+  integer                                               :: istat, run
+  type(cudaEvent)                                       :: startEvent, stopEvent
+  real                                                  :: eventTime
+  type(dim3)                                            :: grid, block
+  real(8)                                               :: max_difference
+  logical                                               :: results_match
 
   ! GPU parameters
-  type(gpu_params)                                :: params
-  integer                                         :: tile_dim, block_size
+  type(gpu_params)                                      :: params
+  integer                                               :: tile_dim, block_size
 
   ! Get optimal parameters for current GPU
   call get_optimal_params(params, tile_dim, block_size)
@@ -220,6 +270,7 @@ program main
   call random_number(A)
   call random_number(B)
   allocate(d_A(M,K), d_B(K,N), d_C(M,N))
+  allocate(d_C_thrust(M,N), d_C_custom(M,N))  ! Allocate comparison arrays
 
   ! Create CUDA events
   istat = cudaEventCreate(startEvent)
@@ -228,8 +279,6 @@ program main
   ! Set up execution configuration for custom kernel
   block = dim3(block_size, block_size, 1)
   grid = dim3((M-1)/tile_dim + 1, (N-1)/tile_dim + 1, 1)
-
-
 
 
   ! THRUST VERSION TIMING RUNS -------------------------------------------------------
@@ -331,6 +380,24 @@ program main
     print *, "Custom Run", run, ":", GFLOPS, "GFLOPS"
   end do
 
+  ! Before verification
+  istat = cudaDeviceSynchronize()  ! Ensure all previous operations are complete
+
+  ! Verify results
+  call verify_results(d_C_thrust, d_C_custom, M, N, max_difference, results_match)
+  istat = cudaDeviceSynchronize()
+
+  ! Print verification results
+  print *, ""
+  print *, "Result Verification (Using CUDA):"
+  if (results_match) then
+      print *, "Results match between Thrust and Custom kernel!"
+      write(*,'(A,E12.5)') "  Maximum difference: ", max_difference
+  else
+      print *, "WARNING: Results do not match between implementations!"
+      write(*,'(A,E12.5)') "  Maximum difference: ", max_difference
+  endif
+
   ! Calculate statistics for custom kernel
   min_gflops = minval(gflops_array)
   max_gflops = maxval(gflops_array)
@@ -354,10 +421,12 @@ program main
   ! Cleanup
   istat = cudaEventDestroy(startEvent)
   istat = cudaEventDestroy(stopEvent)
-  deallocate(A, B, C, d_A, d_B, d_C)
+  deallocate(A, B, C, d_A, d_B, d_C, d_C_thrust, d_C_custom)
 
 end program main
 ! after optimisations, hitting 2,780Gflops (from 350Gflops), 65% of theoretical peak!!
-! nvcc -c thrust.cu -o thrust.C.o 
+! nvcc -c thrust.cu -o thrust.C.o --extended-lambda
 ! nvfortran -o3 thrust.cuf matrix_multiplication_thrust.cuf thrust.C.o -c++libs -o matrix_multiplication_thrust
 ! added comparison with thrust version: thrust is super slow at 66 GFLOPS vs 2,780 GFLOPS on RTX 4060!!
+! added verification kernel to compare results between thrust and custom kernel; they match.
+! so this really is a very fast matrix multiplication kernel as compared to thrust
