@@ -1,5 +1,5 @@
-I came across a device unavailable error when using thrust kernels and then using my custom CUDA kernels in Fortran. 
-One way to solve it was to run the thrust kernel first. This is a more systematic solution.
+I came across a `device unavailable` error when using thrust kernels and then using my custom CUDA kernels in Fortran. 
+One way to solve it was to run the thrust kernel first. This is a more flexible solution.
 Here are the key steps we took to resolve the device unavailable error and ensure that the Thrust kernels work seamlessly with custom CUDA kernels:
 
 ### Key Steps to Resolve Device Unavailable Error
