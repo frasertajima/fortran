@@ -1,0 +1,106 @@
+program test_thrust_with_custom_kernel
+  use cudafor
+  use thrust
+  implicit none
+
+  integer                                   :: deviceCount, cudaStat, deviceID
+  real(c_double), device, allocatable       :: d_A(:), d_B(:), d_C(:)
+  real(c_double), allocatable               :: h_C(:)
+  integer                                   :: M, N, K, i
+
+  ! Parameters for matrix multiplication
+  M = 3
+  N = 3
+  K = 3
+
+  ! Get the number of CUDA devices
+  cudaStat = cudaGetDeviceCount(deviceCount)
+  print *, 'Number of CUDA devices: ', deviceCount
+
+  ! Check if the CUDA function was successful
+  if (cudaStat /= 0) then
+    print *, 'Error getting device count: ', cudaGetErrorString(cudaStat)
+    stop
+  end if
+
+  ! Set the device index
+  deviceID = 0
+  cudaStat = cudaSetDevice(deviceID)
+  if (cudaStat /= 0) then
+    print *, 'Error setting CUDA device: ', cudaGetErrorString(cudaStat)
+    stop
+  end if
+
+  ! Allocate device memory for matrices
+  allocate(d_A(M*K), d_B(K*N), d_C(M*N))
+
+  ! Initialize matrices A and B with some values
+  d_A = reshape([(i, i=1,M*K)], shape=[M*K])
+  d_B = reshape([(i, i=1,K*N)], shape=[K*N])
+
+  ! Run the custom CUDA kernel
+  call run_custom_kernel(d_A, d_B, d_C, M, N, K)
+
+  ! Call the Thrust matrix multiplication function
+  call thrust_matrix_multiply(d_A, d_B, d_C, M, N, K)
+
+  ! Allocate host memory for matrix C
+  allocate(h_C(M*N))
+
+  ! Use thrust to copy results from device to host
+  call thrust_copy_device_to_host(d_C, h_C, M*N)
+
+  ! Print the results
+  print *, 'Matrix C:'
+  do i = 1, M*N
+    print *, h_C(i)
+  end do
+
+  ! Call a C++ function to test Thrust
+  call thrust_test()
+
+  print *, 'CUDA device and Thrust test completed successfully!'
+
+  ! Deallocate device and host memory
+  deallocate(d_A, d_B, d_C, h_C)
+
+contains
+
+  subroutine run_custom_kernel(A, B, C, M, N, KK)
+    real(c_double), device, intent(in)          :: A(:), B(:)
+    real(c_double), device, intent(out)         :: C(:)
+    integer, intent(in)                         :: M, N, KK
+    integer                                     :: i, j, k
+    integer                                     :: cudaStat
+    real(c_double)                              :: temp, a_val, b_val
+
+    ! Custom CUDA kernel logic
+    do i = 1, M
+      do j = 1, N
+        temp = 0.0
+        do k = 1, KK
+          a_val = A(i + (k - 1) * M)
+          b_val = B(k + (j - 1) * KK)
+          temp = temp + a_val * b_val
+        end do
+        C(i + (j - 1) * M) = temp
+      end do
+    end do
+
+    ! Check for CUDA errors
+    cudaStat = cudaGetLastError()
+    if (cudaStat /= cudaSuccess) then
+      print *, 'CUDA error in custom kernel: ', cudaGetErrorString(cudaStat)
+      cudaStat = cudaDeviceReset()              ! most important to reset the device
+      stop
+    end if
+  end subroutine run_custom_kernel
+
+end program test_thrust_with_custom_kernel
+! uses thrust copy instead of cudaMemcpy
+! this program runs the custom CUDA kernel first and then the thrust kernel
+! before, I was getting "device unavailable" errors which I could only solve by running the thrust kernel first
+! now, I can run the custom kernel first and then the thrust kernel or visa versa
+! compile with:
+! nvcc -c thrust.cu -o thrust.C.o
+! nvfortran thrust.cuf test_device.cuf thrust.C.o -c++libs -o test_device

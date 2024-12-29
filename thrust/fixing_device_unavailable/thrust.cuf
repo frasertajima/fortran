@@ -1,0 +1,23 @@
+module thrust
+    use iso_c_binding
+
+    interface
+        subroutine thrust_matrix_multiply(A, B, C, M, N, K) bind(C, name="thrust_matrix_multiply")
+            use iso_c_binding
+            real(c_double), device  :: A(*), B(*), C(*)
+            integer(c_int), value   :: M, N, K
+        end subroutine thrust_matrix_multiply
+
+        subroutine thrust_copy_device_to_host(device_data, host_data, size) bind(C, name="thrust_copy_device_to_host")
+            use iso_c_binding
+            real(c_double), device  :: device_data(*)
+            real(c_double)          :: host_data(*)
+            integer(c_int), value   :: size
+        end subroutine thrust_copy_device_to_host
+
+        subroutine thrust_test() bind(C, name="thrust_test")
+            use iso_c_binding
+        end subroutine thrust_test
+    end interface
+
+end module thrust
