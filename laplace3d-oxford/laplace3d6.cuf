@@ -1,0 +1,314 @@
+module laplace3d_module
+    use cudafor
+    implicit none
+
+    ! Define block size constants and stream count
+    integer, parameter :: BLOCK_X = 16  ! Increased for better coalescing
+    integer, parameter :: BLOCK_Y = 4
+    integer, parameter :: BLOCK_Z = 4
+    integer, parameter :: ELEMENTS_PER_THREAD = 4  ! Increased from 4 to 16
+
+contains
+
+    attributes(global) subroutine GPU_laplace3d(NX, NY, NZ, u1, u2)
+        implicit none
+        integer, value :: NX, NY, NZ
+        real, device :: u1(NX*NY*NZ), u2(NX*NY*NZ)
+        integer :: i, j, k, k_base, indg, IOFF, JOFF, KOFF
+        real :: u2_val, sixth
+        integer :: k_step
+
+        sixth = 1.0/6.0
+
+        i = threadIdx%x + (blockIdx%x-1)*blockDim%x
+        j = threadIdx%y + (blockIdx%y-1)*blockDim%y
+        k_base = threadIdx%z + (blockIdx%z-1)*blockDim%z
+
+        IOFF = 1
+        JOFF = NX
+        KOFF = NX*NY
+
+        ! Process more elements per thread
+        do k_step = 0, ELEMENTS_PER_THREAD-1
+            k = k_base + k_step * gridDim%z * blockDim%z
+
+            if (k <= NZ) then
+                indg = i + (j-1)*JOFF + (k-1)*KOFF
+
+                if (i>=1 .and. i<=NX .and. j>=1 .and. j<=NY .and. k>=1 .and. k<=NZ) then
+                    if (i==1 .or. i==NX .or. j==1 .or. j==NY .or. k==1 .or. k==NZ) then
+                        u2_val = u1(indg)
+                    else
+                        u2_val = (u1(indg-IOFF) + u1(indg+IOFF) + &
+                                 u1(indg-JOFF) + u1(indg+JOFF) + &
+                                 u1(indg-KOFF) + u1(indg+KOFF)) * sixth
+                    endif
+                    u2(indg) = u2_val
+                endif
+            endif
+        enddo
+    end subroutine GPU_laplace3d
+
+  ! CPU reference implementation
+  subroutine Gold_laplace3d(NX, NY, NZ, u1, u2)
+    integer(8), intent(in) :: NX, NY, NZ
+    real, intent(in) :: u1(:)
+    real, intent(out) :: u2(:)
+
+    integer(8) :: i, j, k, ind
+    real :: sixth
+
+    sixth = 1.0/6.0
+
+    do k = 1, NZ
+      do j = 1, NY
+        do i = 1, NX
+          ind = i + (j-1)*NX + (k-1)*NX*NY
+
+          if (i == 1 .or. i == NX .or. j == 1 .or. j == NY .or. k == 1 .or. k == NZ) then
+            u2(ind) = u1(ind)  ! Dirichlet boundary conditions
+          else
+            u2(ind) = (u1(ind-1) + u1(ind+1) + &
+                      u1(ind-NX) + u1(ind+NX) + &
+                      u1(ind-NX*NY) + u1(ind+NX*NY)) * sixth
+          end if
+        end do
+      end do
+    end do
+
+  end subroutine Gold_laplace3d
+
+  ! helper routines from helper_cuda.h and helper_string.h
+  subroutine check_cuda_error(ierr, message)
+      integer, intent(in) :: ierr
+      character(len=*), intent(in) :: message
+
+      if (ierr /= cudaSuccess) then
+          write(*,*) "CUDA error: ", trim(message)
+          write(*,*) "Error code: ", ierr
+          write(*,*) "Error message: ", cudaGetErrorString(ierr)
+          stop
+      endif
+  end subroutine check_cuda_error
+
+  ! Device query/initialization
+  subroutine init_cuda()
+      type(cudaDeviceProp) :: prop
+      integer :: ierr, dev_count, dev
+
+      ierr = cudaGetDeviceCount(dev_count)
+      call check_cuda_error(ierr, "cudaGetDeviceCount")
+
+      if (dev_count == 0) then
+          write(*,*) "No CUDA devices found"
+          stop
+      endif
+
+      ! Use first device by default
+      dev = 0
+      ierr = cudaSetDevice(dev)
+      call check_cuda_error(ierr, "cudaSetDevice")
+
+      ! Get and print device properties
+      ierr = cudaGetDeviceProperties(prop, dev)
+      call check_cuda_error(ierr, "cudaGetDeviceProperties")
+
+      write(*,*) "Using CUDA device: ", trim(prop%name)
+      write(*,*) "Compute capability: ", prop%major, ".", prop%minor
+      write(*,*) "Max threads per block: ", prop%maxThreadsPerBlock
+      write(*,*) "Max grid dimensions: ", prop%maxGridSize
+  end subroutine init_cuda
+
+  ! Timer utilities
+  subroutine start_timer(start, stop)
+      type(cudaEvent), intent(inout) :: start, stop
+      integer :: ierr
+
+      ierr = cudaEventCreate(start)
+      call check_cuda_error(ierr, "cudaEventCreate(start)")
+
+      ierr = cudaEventCreate(stop)
+      call check_cuda_error(ierr, "cudaEventCreate(stop)")
+
+      ierr = cudaEventRecord(start, 0)
+      call check_cuda_error(ierr, "cudaEventRecord(start)")
+  end subroutine start_timer
+
+  subroutine stop_timer(start, stop, time_ms)
+      type(cudaEvent), intent(inout) :: start, stop
+      real, intent(out) :: time_ms
+      integer :: ierr
+
+      ierr = cudaEventRecord(stop, 0)
+      call check_cuda_error(ierr, "cudaEventRecord(stop)")
+
+      ierr = cudaEventSynchronize(stop)
+      call check_cuda_error(ierr, "cudaEventSynchronize")
+
+      ierr = cudaEventElapsedTime(time_ms, start, stop)
+      call check_cuda_error(ierr, "cudaEventElapsedTime")
+
+      ierr = cudaEventDestroy(start)
+      call check_cuda_error(ierr, "cudaEventDestroy(start)")
+
+      ierr = cudaEventDestroy(stop)
+      call check_cuda_error(ierr, "cudaEventDestroy(stop)")
+  end subroutine stop_timer
+
+end module laplace3d_module
+
+
+
+program laplace3d
+    use cudafor
+    use laplace3d_module
+    implicit none
+
+    ! Parameters
+    integer, parameter :: NX = 512, NY = 512, NZ = 512
+    integer, parameter :: REPEAT = 20
+
+    ! Variables
+    real, allocatable, pinned :: h_u1(:), h_u2(:), h_ref(:)
+    real, device, allocatable :: d_u1(:), d_u2(:), d_temp(:)
+    integer :: i, j, k, ind, bx, by, bz, ierr, iter
+    real :: err, sixth = 1.0/6.0
+    type(dim3) :: dimGrid, dimBlock
+    type(cudaEvent) :: start, stop
+    real :: milli, cpu_time
+    integer(kind=8) :: timing_start, timing_end, timing_rate
+
+    ! Print grid dimensions
+    write(*,'(A,I4,A,I4,A,I4)') 'Grid dimensions:', NX, ' x', NY, ' x', NZ
+
+    ! Allocate arrays
+    allocate(h_u1(NX*NY*NZ), h_u2(NX*NY*NZ), h_ref(NX*NY*NZ))
+    allocate(d_u1(NX*NY*NZ), d_u2(NX*NY*NZ), d_temp(NX*NY*NZ))
+
+    ! Initialize u1
+    do k = 1, NZ
+        do j = 1, NY
+            do i = 1, NX
+                ind = i + (j-1)*NX + (k-1)*NX*NY
+                if (i==1 .or. i==NX .or. j==1 .or. j==NY .or. k==1 .or. k==NZ) then
+                    h_u1(ind) = 1.0  ! Dirichlet b.c.'s
+                else
+                    h_u1(ind) = 0.0
+                endif
+            enddo
+        enddo
+    enddo
+
+    ! Create CUDA events for timing
+    ierr = cudaEventCreate(start)
+    ierr = cudaEventCreate(stop)
+
+    ! Copy u1 to device
+    ierr = cudaEventRecord(start, 0)
+    d_u1 = h_u1
+    ierr = cudaEventRecord(stop, 0)
+    ierr = cudaEventSynchronize(stop)
+    ierr = cudaEventElapsedTime(milli, start, stop)
+    write(*,'(A,F10.1,A)') 'Copy u1 to device:', milli, ' (ms)'
+
+    ! CPU (Gold) version for reference
+    h_ref = h_u1
+    call cpu_timer_start()
+    do iter = 1, REPEAT
+        do k = 1, NZ
+            do j = 1, NY
+                do i = 1, NX
+                    ind = i + (j-1)*NX + (k-1)*NX*NY
+                    if (i==1 .or. i==NX .or. j==1 .or. j==NY .or. k==1 .or. k==NZ) then
+                        h_u2(ind) = h_ref(ind)  ! Dirichlet b.c.'s
+                    else
+                        h_u2(ind) = (h_ref(ind-1) + h_ref(ind+1) + &
+                                   h_ref(ind-NX) + h_ref(ind+NX) + &
+                                   h_ref(ind-NX*NY) + h_ref(ind+NX*NY)) * sixth
+                    endif
+                enddo
+            enddo
+        enddo
+        h_ref = h_u2  ! Update for next iteration
+    enddo
+    cpu_time = cpu_timer_stop()
+    write(*,'(I3,A,F10.1,A)') REPEAT, 'x Gold_laplace3d:', cpu_time, ' (ms)'
+
+
+    ! Adjust grid dimensions for multiple elements per thread
+    bx = (NX + BLOCK_X - 1)/BLOCK_X
+    by = (NY + BLOCK_Y - 1)/BLOCK_Y
+    bz = (NZ + BLOCK_Z*ELEMENTS_PER_THREAD - 1)/(BLOCK_Z*ELEMENTS_PER_THREAD)
+    dimGrid = dim3(bx, by, bz)
+    dimBlock = dim3(BLOCK_X, BLOCK_Y, BLOCK_Z)
+
+    ! Execute GPU kernel
+    ierr = cudaEventRecord(start, 0)
+    do iter = 1, REPEAT
+        call GPU_laplace3d<<<dimGrid, dimBlock>>>(NX, NY, NZ, d_u1, d_u2)
+        ! Swap arrays
+        d_temp = d_u1
+        d_u1 = d_u2
+        d_u2 = d_temp
+    enddo
+
+    ierr = cudaEventRecord(stop, 0)
+    ierr = cudaEventSynchronize(stop)
+    ierr = cudaEventElapsedTime(milli, start, stop)
+    write(*,'(I3,A,F10.1,A)') REPEAT, 'x GPU_laplace3d:', milli, ' (ms)'
+
+    ! Copy result back to host
+    ierr = cudaEventRecord(start, 0)
+    h_u2 = d_u1
+    ierr = cudaEventRecord(stop, 0)
+    ierr = cudaEventSynchronize(stop)
+    ierr = cudaEventElapsedTime(milli, start, stop)
+    write(*,'(A,F10.1,A)') 'Copy u2 to host:', milli, ' (ms)'
+
+    ! Error check against CPU version
+    err = 0.0
+    do k = 1, NZ
+        do j = 1, NY
+            do i = 1, NX
+                ind = i + (j-1)*NX + (k-1)*NX*NY
+                err = err + (h_ref(ind)-h_u2(ind))**2
+            enddo
+        enddo
+    enddo
+    write(*,'(A,ES20.12)') 'RMS error =', sqrt(err/real(NX*NY*NZ))
+
+    ! Cleanup
+    deallocate(h_u1, h_u2, h_ref, d_u1, d_u2, d_temp)
+    ierr = cudaEventDestroy(start)
+    ierr = cudaEventDestroy(stop)
+
+contains
+    subroutine cpu_timer_start()
+        call system_clock(timing_start, timing_rate)
+    end subroutine
+
+    function cpu_timer_stop() result(elapsed_time)
+        real :: elapsed_time
+        call system_clock(timing_end)
+        elapsed_time = real(timing_end - timing_start) * 1000.0 / real(timing_rate)
+    end function
+
+end program laplace3d
+! better u1 and u2 copy speed but slower kernel compared to c++ original
+! Grid dimensions: 512 x 512 x 512
+! Copy u1 to device:      63.1 (ms)
+! 20x Gold_laplace3d:    8974.6 (ms)
+! 20x GPU_laplace3d:     428.6 (ms)
+! Copy u2 to host:      73.9 (ms)
+! RMS error =  0.000000000000E+00
+! tried various optimisations but not much help (usually slower); thrust slowed it down!!
+! laplace kernel is highly optimised in c++ original
+! curiously, the host to device and device to host transfers were not (and the delta was huge)
+!  Grid dimensions:           512  x           512  x           512
+! Copy u1 to device:     502.8422      (ms)
+!          20 x Gold_laplace3d:     3775.813      (ms)
+!          20 x GPU_laplace3d:      352.5850      (ms)
+! Copy u2 to host:       541.5609      (ms)
+! RMS error =            0.000000000000000
+! so While the CPU version is 2x faster on C++, the host-device and device-host copy was 10x slower
+! pending any further Fortran improvements (more learning required), the C++ version is the best
