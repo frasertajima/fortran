@@ -1,5 +1,6 @@
 Great CUDA course: https://people.maths.ox.ac.uk/gilesm/cuda/index.html has a laplace3d version in C++. Performance was good so the question
 was whether Fortran or thrust could improve this custom kernel. Claude helped with a fortran version of the C++ laplace program in exercise 3 of the course.
+laplace3d6 is the CUDA Fortran version while laplace3d is the course C++ version in the screenshot.
 
 Observations:
 1. the main laplace kernel is highly optimised and given the size of the problem, there was not much improvement possible
