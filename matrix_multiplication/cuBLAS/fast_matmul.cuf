@@ -1,0 +1,39 @@
+module fast_matmul
+    use cudafor
+    use cublas_v2
+    implicit none
+
+    type(cublasHandle), save :: handle
+    logical :: initialized = .false.
+
+contains
+    subroutine init_cublas()
+        integer :: istat
+        if (.not. initialized) then
+            istat = cublasCreate(handle)
+            istat = cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH)
+            initialized = .true.
+        endif
+    end subroutine
+
+    subroutine cleanup_cublas()
+        integer :: istat
+        if (initialized) then
+            istat = cublasDestroy(handle)
+            initialized = .false.
+        endif
+    end subroutine
+
+    subroutine tf32_matmul(A, B, C, M, N, K) bind(c, name='tf32_matmul')
+        real(4), device, intent(in)  :: A(M,K), B(K,N)
+        real(4), device, intent(out) :: C(M,N)
+        integer, value, intent(in) :: M, N, K
+        integer :: istat
+        real(4), parameter :: alpha = 1.0, beta = 0.0
+
+        call init_cublas()
+        istat = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, &
+                           M, N, K, alpha, A, M, B, K, beta, C, M)
+    end subroutine
+end module
+! nvfortran -O3 -cudalib=cublas -shared -fPIC fast_matmul.cuf -o fast_matmul.so
