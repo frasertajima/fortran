@@ -1,0 +1,30 @@
+module thrust
+    use iso_c_binding
+
+    interface
+        subroutine thrust_print_matrix_info(M, N, K) bind(C)
+            use iso_c_binding
+            integer(c_int), value :: M, N, K
+        end subroutine
+
+        subroutine thrust_matrix_multiply(A, B, C, M, N, K) bind(C, name="thrust_matrix_multiply")
+            use iso_c_binding
+            real(c_double), device :: A(*), B(*), C(*)
+            integer(c_int), value :: M, N, K
+        end subroutine thrust_matrix_multiply
+
+        subroutine thrust_test() bind(C, name="thrust_test")
+            use iso_c_binding
+        end subroutine thrust_test
+
+        function thrust_init() bind(C)
+            use iso_c_binding
+            integer(c_int) :: thrust_init
+        end function
+
+        subroutine thrust_cleanup() bind(C)
+            use iso_c_binding
+        end subroutine
+    end interface
+
+end module thrust
