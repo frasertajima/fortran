@@ -1,0 +1,68 @@
+module thrust
+
+    interface thrustsort
+       subroutine sort_int(input, N) bind(C, name="sort_int_wrapper")
+         use iso_c_binding
+         integer(c_int), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_int
+
+       subroutine sort_float(input, N) bind(C, name="sort_float_wrapper")
+         use iso_c_binding
+         real(c_float), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_float
+
+       subroutine sort_double(input, N) bind(C, name="sort_double_wrapper")
+         use iso_c_binding
+         real(c_double), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_double
+    end interface thrustsort
+
+  interface
+
+     function reduce_int(input, N) bind(C, name="reduce_int_wrapper") result(res)
+       use iso_c_binding
+       integer(c_int), device :: input(*)
+       integer(c_int), value :: N
+       integer(c_int) :: res
+     end function reduce_int
+
+     function reduce_float(input, N) bind(C, name="reduce_float_wrapper") result(res)
+       use iso_c_binding
+       real(c_float), device :: input(*)
+       integer(c_int), value :: N
+       real(c_float) :: res
+     end function reduce_float
+
+     function reduce_double(input, N) bind(C, name="reduce_double_wrapper") result(res)
+       use iso_c_binding
+       real(c_double), device :: input(*)
+       integer(c_int), value :: N
+       real(c_double) :: res
+     end function reduce_double
+
+     subroutine transform_int(input, N) bind(C, name="transform_int_wrapper")
+       use iso_c_binding
+       integer(c_int), device :: input(*)
+       integer(c_int), value :: N
+     end subroutine transform_int
+
+     subroutine transform_float(input, N) bind(C, name="transform_float_wrapper")
+       use iso_c_binding
+       real(c_float), device :: input(*)
+       integer(c_int), value :: N
+     end subroutine transform_float
+
+     subroutine transform_double(input, N) bind(C, name="transform_double_wrapper")
+       use iso_c_binding
+       real(c_double), device :: input(*)
+       integer(c_int), value :: N
+     end subroutine transform_double
+  end interface
+
+end module thrust
+! generic wrapper module for thrust functions to Fortran
+! kept thrustsort interface as it is called
+! added other functions such as reduction and transformation

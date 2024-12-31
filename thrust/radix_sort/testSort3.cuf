@@ -1,0 +1,61 @@
+program testsort3
+  use thrust
+  use iso_fortran_env
+  implicit none
+
+  integer(kind=8)                   :: n
+  integer(kind=8), parameter        :: max_n = 9223372036854775807_8  ! 2^63 - 1
+  real, allocatable                 :: cpuData(:)
+  real, device, allocatable         :: gpuData(:)
+  real                              :: start, finish
+  integer                           :: result
+
+  ! Get array size from user with validation
+  do
+    print *, 'Enter array size (1 to ', max_n, '):'
+    read *, n
+    if (n >= 1 .and. n <= max_n) exit
+    print *, 'Invalid size. Please try again.'
+  end do
+
+  ! Allocate arrays
+  allocate(cpuData(n))
+  allocate(gpuData(n))
+
+  call random_number(cpuData)
+
+  print *, "First 200 elements before sorting:"
+  print *, cpuData(1:min(200,n))
+
+  gpuData=cpuData
+  call cpu_time(start)
+  call thrustsort(gpuData, size(gpuData))
+  call cpu_time(finish)
+  cpuData=gpuData
+
+  print *, "First 200 elements after sorting:"
+  print *, cpuData(1:min(200,n))
+  print *, "Sort time (seconds):", finish-start
+
+  ! Call the Thrust reduce function
+  result = reduce_float(gpuData, size(gpuData))
+  print *, "Reduction result: ", result
+
+  ! Call the Thrust transform function (square each element)
+  call transform_float(gpuData, size(gpuData))
+  cpuData=gpuData
+  print *, "First 200 elements after transform (square each element):"
+  print *, cpuData(1:min(200,n))
+
+  deallocate(cpuData)
+  deallocate(gpuData)
+end program testsort3
+! sorting using thrust library (better than my radix sort!!)
+! took only 6.652E-03 seconds for 2M elements, 3.64E-02 seconds for N=200M
+! larger numbers need kind=8, etc.
+! needs fedora 39 distrobox to get gcc version 13 (making gcc takes time); needed to create symbolic link to 13 as well
+! nvcc -c -o thrust.C.o thrust.cu
+! nvfortran thrust.cuf testSort2.cuf thrust.C.o -c++libs -o testSort2
+! 800M seems to be the largest array before memory runs out (takes 0.1279s)
+! version 3 extends the sort example to add more thrust functions
+! use the thrust.cu and thrust.cuf as generic interfaces to the thrust library!
