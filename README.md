@@ -12,6 +12,6 @@ examples while I learn Fortran:
 9. replace_hard_line_breaks.f90: replaces hard line breaks created by llama3.1 when proofreading text with spaces for ease of editing. Asks for input markdown file name and output markdown file name.
 10. replace_clipboard_linebreaks.f90: replaces the linux system clipboard text instead of a markdown file; this should make it easier: you copy the proofread output from llama3.1, run `./replace_clipboard_linebreaks` and then paste the clipboard into Obsidian or another editor (without needing to save the proofread text into a file and copy the processed text back).
 11. cuda_device_query: small CUDA utility to display your GPU CUDA capabilities (useful for fitting programs to your GPU's abilities).
-12. radix_sort: a massive 17 week project to get it running and try to optimise it; upended by thrust which completely outperformed it (still working on optimising custom kernel)
+12. radix_sort: a massive 17 week project to get it running and try to optimise it; upended by thrust version (under thrust folder) which completely outperformed it (still working on optimising custom kernel)
 13. laplace3D Oxford: C++ kernel was unbeatable in CUDA Fortran but host-device and device-host transfers were improved
 14. matrix multiplication: custom kernel went from 300Gflops to 3,000Gflops after interesting optimisations in CUDA; cuBLAS blew this out of the water with 12,000Gflops
