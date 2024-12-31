@@ -11,4 +11,4 @@
 ! nvcc -c -o thrust.C.o thrust.cu
 ! nvfortran thrust.cuf testSort2.cuf thrust.C.o -c++libs -o testSort2
 ! 800M seems to be the largest array before memory runs out (takes 0.1279s)
-! version 3 extends the sort example to add more thrust functions
+! version 3 extends the sort example: sort, reduction and transform
