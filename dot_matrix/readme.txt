@@ -1,0 +1,1 @@
+Developed a cp.dot(a,a) drop in replacement for cupy and numpy dot matrix multiplication library. It trades a tiny bit of accuracy for a huge speedup. I was getting annoyed with very long numpy and cupy operations in machine learning.
