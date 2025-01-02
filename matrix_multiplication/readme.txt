@@ -6,3 +6,4 @@ To compile thrust libraries and use them in CUDA Fortran:
 4. run './matrix_multiplication_thrust`
 GPU load: https://www.threads.net/@mean.absolute.error/post/DEBgHZ6PRvg?xmt=AQGz1SMlWeMwzRhLysxvRQ5DadbrYsnq9f0admE59KRuYA
 Thrust and custom CUDA kernel results match.
+NOTE: supreceeded by cuBLAS libary version under /cuBLAS as it gets 12Tflops with better accuracy to reference
