@@ -1,3 +1,3 @@
 Developed a cp.dot(a,a) drop in replacement for cupy and numpy dot matrix multiplication library. It trades a tiny bit of accuracy for a huge speedup. I was getting annoyed with very long numpy and cupy operations in machine learning. A version that maintains perfect accuracy was also developed but there was no point as it was only a tiny bit faster than cupy.
-Distributing compiled version and testing notebook for now as it undergoes testing.
+Distributing compiled version and testing notebook for now as it undergoes testing. Binary exponention commented in the notebooks is not being used in this instance (it is a different version).
 https://www.threads.net/@mean.absolute.error/post/DETyNGQRVJZ?xmt=AQGzVigiejI7P1_h3cZ9Xky-XrOz5nVBYG3k1HQ2luzWrQ
