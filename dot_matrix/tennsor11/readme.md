@@ -131,3 +131,5 @@ result_5d = ops.tensor_5d_matmul(tensor_a, tensor_b)
 3. Use in machine learning Jupyter notebooks (beyond Mnist example)
 
 This implementation provides a high-performance framework for GPU-accelerated matrix operations while maintaining more than sufficient accuracy for most applications.
+
+Claude Sonnet 3.7 seems excited: https://www.threads.net/@mean.absolute.error/post/DGeUA5Qy2jW?xmt=AQGz81zjqJKGKohdM8-aE_9uRuHkkXEOND5dyoslkn_BqA
