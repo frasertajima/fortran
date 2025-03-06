@@ -2,7 +2,28 @@ import numpy as np
 import cupy as cp
 import ctypes
 import time
-import concurrent.futures  # Add this import
+
+# Define module-level variables for the singleton pattern
+_CUDA_INITIALIZED = False
+_LIB_INSTANCE = None
+
+# Add this method after the imports but before the TensorMatrixOps class
+def _get_singleton_library(lib_path):
+    """Get or initialize the singleton library instance."""
+    global _CUDA_INITIALIZED, _LIB_INSTANCE
+
+    # If already initialized, return the existing instance
+    if _CUDA_INITIALIZED and _LIB_INSTANCE is not None:
+        return _LIB_INSTANCE
+
+    # Otherwise, load the library
+    try:
+        print(f"Loading library: {lib_path}")
+        _LIB_INSTANCE = ctypes.CDLL(lib_path)
+        return _LIB_INSTANCE
+    except Exception as e:
+        print(f"Error loading library: {e}")
+        raise
 
 class TensorMatrixOps:
     """GPU-accelerated matrix operations using tensor cores.
@@ -17,6 +38,8 @@ class TensorMatrixOps:
     - Strided batch multiply
     """
 
+
+    # Then modify your __init__ method to use the function:
     def __init__(self, lib_path='./cuda_matlib.so', tensor_cores=None):
         """Initialize with proper device capability detection and tensor core configuration.
 
@@ -24,19 +47,24 @@ class TensorMatrixOps:
             lib_path: Path to the compiled CUDA Fortran library
             tensor_cores: Number of tensor cores to use. None means use default.
         """
+        global _CUDA_INITIALIZED
+
         try:
             # Initialize CUDA first
             self._init_cuda()
 
-            # Load the library
-            self.lib = ctypes.CDLL(lib_path)
-            print(f"Loaded library: {lib_path}")
+            # Get the singleton library instance
+            self.lib = _get_singleton_library(lib_path)
 
             # Set up function signatures first
             self._setup_functions()
 
-            # Initialize CUDA and cuBLAS first
-            self.lib.py_initialize_cuda_resources()
+            # Initialize CUDA and cuBLAS first - but only once across all instances
+            if not _CUDA_INITIALIZED:
+                print("Initializing CUDA resources (one-time operation)...")
+                self.lib.py_initialize_cuda_resources()
+                _CUDA_INITIALIZED = True
+                print("CUDA resources initialized")
 
         except Exception as e:
             print(f"Initialization error: {e}")
@@ -120,6 +148,24 @@ class TensorMatrixOps:
             ctypes.c_int        # new_width  <-- Added this argument
         ]
         self.lib.py_tensor_5d_matmul.restype = None  # Explicitly set return type
+
+
+        self.lib.py_edge_detection_tensor.argtypes = [
+            ctypes.c_void_p,    # Input image
+            ctypes.c_void_p,    # Output result
+            ctypes.c_int,       # height
+            ctypes.c_int        # width
+        ]
+        self.lib.py_edge_detection_tensor.restype = None
+
+        # Edge detection - parallel version
+        self.lib.py_edge_detection_parallel.argtypes = [
+            ctypes.c_void_p,    # Input image
+            ctypes.c_void_p,    # Output result
+            ctypes.c_int,       # height
+            ctypes.c_int        # width
+        ]
+        self.lib.py_edge_detection_parallel.restype = None
 
         print("Function signatures configured")
 
@@ -622,6 +668,180 @@ class TensorMatrixOps:
             print(cp.cuda.runtime.memGetInfo())
             raise
 
+
+    """
+    image
+    """
+
+    def add_tensor_convolution_methods(self):
+        """Add tensor-optimized convolution methods to TensorMatrixOps"""
+        # Set up multi-kernel convolution function signature
+        self.lib.py_multi_kernel_conv2d.argtypes = [
+            ctypes.c_void_p,  # image
+            ctypes.c_void_p,  # kernels
+            ctypes.c_void_p,  # results
+            ctypes.c_int,     # height
+            ctypes.c_int,     # width
+            ctypes.c_int,     # kernel_h
+            ctypes.c_int,     # kernel_w
+            ctypes.c_int      # num_kernels
+        ]
+
+        # Set up tensor-optimized edge detection function signature
+        self.lib.py_edge_detection_tensor.argtypes = [
+            ctypes.c_void_p,  # image
+            ctypes.c_void_p,  # result
+            ctypes.c_int,     # height
+            ctypes.c_int,     # width
+        ]
+
+        # Add methods to the instance
+        self.multi_kernel_convolution = multi_kernel_convolution.__get__(self)
+        self.edge_detection_tensor = edge_detection_tensor.__get__(self)
+        self.blur_tensor = blur_tensor.__get__(self)
+        self.sharpen_tensor = sharpen_tensor.__get__(self)
+
+    def multi_kernel_convolution(self, image, kernels):
+        """Apply multiple convolution kernels simultaneously using tensor cores
+
+        Args:
+            image: 2D numpy or cupy array
+            kernels: 3D array of convolution kernels (kernel_h, kernel_w, num_kernels)
+
+        Returns:
+            3D array of convolution results (height, width, num_kernels)
+        """
+        # Convert to device arrays if needed
+        image_d = cp.asarray(image, dtype=cp.float64)
+        kernels_d = cp.asarray(kernels, dtype=cp.float64)
+
+        # Get dimensions
+        height, width = image_d.shape
+        kernel_h, kernel_w, num_kernels = kernels_d.shape
+
+        # Create output array
+        results_d = cp.empty((height, width, num_kernels), dtype=cp.float64)
+
+        # Call the library function
+        self.lib.py_multi_kernel_conv2d(
+            ctypes.c_void_p(image_d.data.ptr),
+            ctypes.c_void_p(kernels_d.data.ptr),
+            ctypes.c_void_p(results_d.data.ptr),
+            ctypes.c_int(height),
+            ctypes.c_int(width),
+            ctypes.c_int(kernel_h),
+            ctypes.c_int(kernel_w),
+            ctypes.c_int(num_kernels)
+        )
+
+        return cp.asnumpy(results_d) if isinstance(image, np.ndarray) else results_d
+
+    def edge_detection_tensor(self, image):
+        """Tensor-optimized edge detection using Sobel filters
+        This uses a tensor core optimized implementation that processes both
+        Sobel filters (X and Y) simultaneously for maximum efficiency.
+
+        Args:
+            image: 2D numpy or cupy array
+
+        Returns:
+            Edge detection result
+        """
+        # Convert to device array if needed
+        image_d = cp.asarray(image, dtype=cp.float64)
+
+        # Get dimensions
+        height, width = image_d.shape
+
+        # Create output array
+        result_d = cp.empty_like(image_d)
+
+        # Call the library function
+        self.lib.py_edge_detection_tensor(
+            ctypes.c_void_p(image_d.data.ptr),
+            ctypes.c_void_p(result_d.data.ptr),
+            ctypes.c_int(height),
+            ctypes.c_int(width)
+        )
+
+        # Return in same format as input
+        return cp.asnumpy(result_d) if isinstance(image, np.ndarray) else result_d
+
+    def edge_detection_parallel(self, image):
+        """Parallel tensor-optimized edge detection using Sobel filters
+        This uses an optimized implementation that processes Sobel filters in parallel
+        streams for maximum performance.
+
+        Args:
+            image: 2D numpy or cupy array
+
+        Returns:
+            Edge detection result
+        """
+        # Convert to device array if needed
+        image_d = cp.asarray(image, dtype=cp.float64)
+
+        # Get dimensions
+        height, width = image_d.shape
+
+        # Create output array
+        result_d = cp.empty_like(image_d)
+
+        # Call the library function
+        self.lib.py_edge_detection_parallel(
+            ctypes.c_void_p(image_d.data.ptr),
+            ctypes.c_void_p(result_d.data.ptr),
+            ctypes.c_int(height),
+            ctypes.c_int(width)
+        )
+
+        # Return in same format as input
+        return cp.asnumpy(result_d) if isinstance(image, np.ndarray) else result_d
+
+    def blur_tensor(self, image, size=3):
+        """Apply tensor-optimized blur to an image
+
+        Args:
+            image: 2D numpy or cupy array
+            size: Blur kernel size (3 or 5)
+
+        Returns:
+            Blurred image
+        """
+        # Create blur kernel
+        if size == 3:
+            kernel = np.ones((3, 3), dtype=np.float64) / 9.0
+        elif size == 5:
+            kernel = np.ones((5, 5), dtype=np.float64) / 25.0
+        else:
+            raise ValueError(f"Unsupported kernel size: {size}. Use 3 or 5.")
+
+        # Apply single kernel convolution - reshape to 3D with one kernel
+        kernel_3d = kernel.reshape(kernel.shape[0], kernel.shape[1], 1)
+        result = self.multi_kernel_convolution(image, kernel_3d)
+
+        # Extract the single result
+        return result[:, :, 0]
+
+    def sharpen_tensor(self, image):
+        """Apply tensor-optimized sharpening to an image
+
+        Args:
+            image: 2D numpy or cupy array
+
+        Returns:
+            Sharpened image
+        """
+        # Create sharpen kernel
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float64)
+
+        # Apply single kernel convolution - reshape to 3D with one kernel
+        kernel_3d = kernel.reshape(3, 3, 1)
+        result = self.multi_kernel_convolution(image, kernel_3d)
+
+        # Extract the single result
+        return result[:, :, 0]
+
     def _ensure_fortran_layout(self, arr):
         """Ensure array is in Fortran-order memory layout."""
         if not isinstance(arr, (np.ndarray, cp.ndarray)):
@@ -629,6 +849,7 @@ class TensorMatrixOps:
         if not arr.flags.f_contiguous:
             return cp.asfortranarray(arr)
         return arr
+
 
     def __enter__(self):
         return self
