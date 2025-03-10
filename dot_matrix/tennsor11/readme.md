@@ -133,3 +133,5 @@ result_5d = ops.tensor_5d_matmul(tensor_a, tensor_b)
 This implementation provides a high-performance framework for GPU-accelerated matrix operations while maintaining more than sufficient accuracy for most applications.
 
 Claude Sonnet 3.7 seems excited: https://www.threads.net/@mean.absolute.error/post/DGeUA5Qy2jW?xmt=AQGz81zjqJKGKohdM8-aE_9uRuHkkXEOND5dyoslkn_BqA
+
+Added cuda_matlib_c86.so kernel to support older GPUs (up to compute 86); rename this file to cuda_matlib.so if you have a compute 86 GPU and above.
