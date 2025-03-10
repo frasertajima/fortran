@@ -135,3 +135,8 @@ This implementation provides a high-performance framework for GPU-accelerated ma
 Claude Sonnet 3.7 seems excited: https://www.threads.net/@mean.absolute.error/post/DGeUA5Qy2jW?xmt=AQGz81zjqJKGKohdM8-aE_9uRuHkkXEOND5dyoslkn_BqA
 
 Added cuda_matlib_c86.so kernel to support older GPUs (up to compute 86); rename this file to cuda_matlib.so if you have a compute 86 GPU and above.
+
+![image](https://github.com/user-attachments/assets/885ba006-9de6-43f0-b713-93ba81451ced)
+
+A WSL2 mismatch between driver 570 in linux and 572 in Windows seems to be causing the image convolution kernel functions to crash (matrix multiplication is ok). Until Nvidia synchronises their drivers, I would  suggest linux for now.
+
