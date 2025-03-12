@@ -140,3 +140,5 @@ Added cuda_matlib_c86.so kernel to support older GPUs (up to compute 86); rename
 
 A WSL2 mismatch between driver 570 in linux and 572 in Windows seems to be causing the image convolution kernel functions to crash (matrix multiplication is ok). Until Nvidia synchronises their drivers, I would  suggest linux for now.
 
+https://www.instagram.com/reel/DHFz0hBMZgY/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+
