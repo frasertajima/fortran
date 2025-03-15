@@ -1,1 +1,3 @@
 While the tensor core version of the n-body calculation can speed up by 2x or less due to memory intensive calculations, that is not to say that optimisations are not possible. With this fortran CUDA kernel, it is possible to run 500,000 particle calculations that take nearly 2 hours in CuPy and 1 hour with the tensor core engine in 44s using the Fortran CUDA kernel. Included is a test notebook and a replication of the solar system demo (along with a new demo). Benchmarks show accuracy is equivalent to CuPy.
+
+https://www.instagram.com/reel/DHMm9M_sd3x/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
