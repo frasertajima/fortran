@@ -2,6 +2,8 @@ Completely refactored vector matrix functions, replacing tensor core operations 
 
 Also updated tensor core engine deploying cross terms for slightly greater accuracy in other matrix operations (slight improvement only).
 
+Compiled for compute 86 (A1000 and above).
+
 ### Vector Matrix:
 Note that the missing accuracy points represent 100% accuracy:
 ![Screenshot From 2025-03-28 10-49-31](https://github.com/user-attachments/assets/27e1d1f6-6f2d-4700-9124-5873e807948a)
