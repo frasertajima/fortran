@@ -110,17 +110,7 @@ class TensorMatrixOps:
             ctypes.c_int
         ]
 
-        self.lib.py_vector_matrix_multiply_opt.argtypes = [
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_int
-        ]
-
         self.lib.py_matrix_vector_multiply.argtypes = [
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_int
-        ]
-
-        self.lib.py_matrix_vector_multiply_opt.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_int
         ]
@@ -356,34 +346,6 @@ class TensorMatrixOps:
 
         return cp.asnumpy(c_gpu) if isinstance(v, np.ndarray) else c_gpu
 
-    def vector_matmul_opt(self, v, a):
-        """Compute vector-matrix multiplication (v*A).
-
-        Args:
-            v: Input vector (n,)
-            a: Input matrix (n x n)
-
-        Returns:
-            Result vector (n,)
-        """
-        v_gpu = cp.asarray(v, dtype=cp.float64)
-        a_gpu = cp.asarray(a, dtype=cp.float64)
-
-        if v_gpu.shape[0] != a_gpu.shape[0]:
-            raise ValueError("Dimensions must match")
-
-        n = v_gpu.shape[0]
-        c_gpu = cp.empty(n, dtype=cp.float64)
-
-        self.lib.py_vector_matrix_multiply_opt(
-            ctypes.c_void_p(v_gpu.data.ptr),
-            ctypes.c_void_p(a_gpu.data.ptr),
-            ctypes.c_void_p(c_gpu.data.ptr),
-            n
-        )
-
-        return cp.asnumpy(c_gpu) if isinstance(v, np.ndarray) else c_gpu
-
     def matmul_vector(self, a, v):
         """Compute matrix-vector multiplication (A*v).
 
@@ -412,36 +374,6 @@ class TensorMatrixOps:
 
         return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
 
-    def matmul_vector_opt(self, a, v):
-        """Compute matrix-vector multiplication (A*v).
-
-        Args:
-            a: Input matrix (n x n)
-            v: Input vector (n,)
-
-        Returns:
-            Result vector (n,)
-        """
-        a_gpu = cp.asarray(a, dtype=cp.float64)
-        v_gpu = cp.asarray(v, dtype=cp.float64)
-
-        if a_gpu.shape[1] != v_gpu.shape[0]:
-            raise ValueError("Dimensions must match")
-
-        n = v_gpu.shape[0]
-        c_gpu = cp.empty(n, dtype=cp.float64)
-
-        self.lib.py_matrix_vector_multiply_opt(
-            ctypes.c_void_p(a_gpu.data.ptr),
-            ctypes.c_void_p(v_gpu.data.ptr),
-            ctypes.c_void_p(c_gpu.data.ptr),
-            n
-        )
-
-        return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
-
-
-    # In tensor_matrix_ops.py
     def strided_batch_matmul(self, m, k, n, batch_size, a, b):
         """Compute strided batch matrix multiplication."""
         # Convert dimensions to integers
@@ -473,7 +405,6 @@ class TensorMatrixOps:
         )
 
         return c_gpu.reshape(batch_size, m, n)
-
 
     # fortran column major, 1-base
     def tensor_4d_matmul(self, a, b):
@@ -573,8 +504,6 @@ class TensorMatrixOps:
 
         # Return based on input type, converting to C order on return.
         return cp.asnumpy(c_gpu, order='C') if isinstance(a, np.ndarray) else c_gpu.copy()
-
-
 
     # python wrapper is running py_matmul, not tensor_5d_matmul; the answers are correct to e-5
     def parallel_tensor_5d_matmul(self, a, b, max_workers=4):
