@@ -25,3 +25,6 @@ Speed for accuracy tradeoff:
 ![image](https://github.com/user-attachments/assets/f378703c-bccf-4188-bf9e-4102ff02cc57)
 
 The end result is a Fortran CUDA kernel that outperforms CuPy on all workflows with 50x-5x in ideal conditions depending on the nature of the matrix multiplication.
+
+NOTE: As of April 15, 2025, with the release of Fedora Silverblue 42 (using gcc 15 instead of gcc 14), it may be necessary to run the CUDA Fortran examples within a distrobox that has gcc 14.2 or lower because gcc 15 enforces tigther security that prevents the nvidia hpc library from loading. Specifically it cannot load a library file (ignore the pygame message): ![Screenshot From 2025-04-15 20-08-31](https://github.com/user-attachments/assets/7ccc0c08-ffb4-497e-9ad6-ff5c3994ed0f). Running VSCode within a Fedora 41 distrobox retains the working state for now.
+
