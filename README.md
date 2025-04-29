@@ -15,3 +15,5 @@ examples while I learn Fortran:
 12. radix_sort: a massive 17 week project to get it running and try to optimise it; upended by thrust version (under thrust folder) which completely outperformed it (still working on optimising custom kernel)
 13. laplace3D Oxford: C++ kernel was unbeatable in CUDA Fortran but host-device and device-host transfers were improved
 14. matrix multiplication: custom kernel went from 300Gflops to 3,000Gflops after interesting optimisations in CUDA; cuBLAS blew this out of the water with 12,000Gflops
+15. matrix_dot using tensor core: https://github.com/frasertajima/fortran/tree/main/dot_matrix/tensor12 newest kernel now hits 35.5TFLOPS vs 300GFLOPS for CuPy for matrix_dot, 18TFLOPS vs 200GFLOPS for matmul, 12TFLOPS vs 193 for batched matrix, and 1.5TFLOPS vs 139GFLOPS for tennsor 4d for example. Other applications using the tensor core engine are also included in the directories under tennsor11, etc.
+![Screenshot From 2025-04-29 08-25-39](https://github.com/user-attachments/assets/38cf6350-0d86-4e5c-9985-91cb8879bb22)
