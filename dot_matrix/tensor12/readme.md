@@ -30,3 +30,7 @@ April 29, 2025: updated kernel to tensor13 internally, improved performance with
 
 NOTE: As of April 15, 2025, with the release of Fedora Silverblue 42 (using gcc 15 instead of gcc 14), it may be necessary to run the CUDA Fortran examples within a distrobox that has gcc 14.2 or lower because gcc 15 enforces tigther security that prevents the nvidia hpc library from loading. Specifically it cannot load a library file (ignore the pygame message): ![Screenshot From 2025-04-15 20-08-31](https://github.com/user-attachments/assets/7ccc0c08-ffb4-497e-9ad6-ff5c3994ed0f). Running VSCode within a Fedora 41 distrobox retains the working state for now.
 
+Added improved_matrix_dot as an option:
+![Screenshot From 2025-05-12 06-43-03](https://github.com/user-attachments/assets/74ea4f20-3176-4f8b-94d0-529b82dff6cf)
+Slower but more accurate.
+
