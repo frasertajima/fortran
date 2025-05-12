@@ -32,5 +32,7 @@ NOTE: As of April 15, 2025, with the release of Fedora Silverblue 42 (using gcc 
 
 Added improved_matrix_dot as an option:
 ![Screenshot From 2025-05-12 06-43-03](https://github.com/user-attachments/assets/74ea4f20-3176-4f8b-94d0-529b82dff6cf)
-Slower but more accurate.
+Slower but more accurate. Original is still the same matrix_dot:
+![Screenshot From 2025-05-12 06-52-00](https://github.com/user-attachments/assets/f4a9ac68-9740-4d44-9bf8-c61cdd09311c)
+
 
