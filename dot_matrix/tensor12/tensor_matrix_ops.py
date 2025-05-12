@@ -95,6 +95,16 @@ class TensorMatrixOps:
             ctypes.c_int, ctypes.c_int
         ]
 
+        # high precision matrix dot
+        self.lib.py_improved_matrix_dot.argtypes = [
+            ctypes.c_void_p,      # a matrix
+            ctypes.c_void_p,      # c result matrix
+            ctypes.c_int,         # n dimension
+            ctypes.c_int,         # power
+            ctypes.c_int          # precision_mode
+        ]
+        self.lib.py_improved_matrix_dot.restype = None
+
         self.lib.py_tensor_matrix_multiply.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
@@ -176,6 +186,50 @@ class TensorMatrixOps:
         cp.cuda.Stream.null.synchronize()
         return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
 
+    def improved_matrix_dot(self, a, power=1, precision_mode=0):
+        """
+        Compute matrix power A^n using tensor cores.
+
+        Parameters:
+        -----------
+        a : array_like
+            Input square matrix
+        power : int
+            Power to raise the matrix to
+        precision_mode : int
+            Precision mode:
+            0 = Default precision (faster)
+            1 = High precision (more accurate)
+
+        Returns:
+        --------
+        array_like
+            Result of A^power
+        """
+        if not isinstance(a, (np.ndarray, cp.ndarray)):
+            raise TypeError("Input must be numpy or cupy array")
+        if a.ndim != 2 or a.shape[0] != a.shape[1]:
+            raise ValueError("Input must be square matrix")
+
+        # Convert to GPU array in Fortran order
+        a_gpu = cp.asfortranarray(cp.asarray(a, dtype=cp.float64))
+        c_gpu = cp.zeros_like(a_gpu, order='F')
+
+        # Call Fortran function with precision mode
+        self.lib.py_improved_matrix_dot(
+            ctypes.c_void_p(a_gpu.data.ptr),
+            ctypes.c_void_p(c_gpu.data.ptr),
+            ctypes.c_int(a_gpu.shape[0]),
+            ctypes.c_int(power),
+            ctypes.c_int(precision_mode)
+        )
+
+        # Ensure all CUDA operations are complete
+        cp.cuda.Stream.null.synchronize()
+
+        # Return result in the same format as the input
+        return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
+
     def matrix_power(self, a, power):
         """Compute matrix power A^n using tensor cores.
 
@@ -239,12 +293,12 @@ class TensorMatrixOps:
 
         return c_f  # Already in correct shape
 
-    def batched_vector_matmul(self, v, a):
-        """Compute batched vector-matrix multiplication matching Fortran dimensions.
-        Args:
-            v: Batch of vectors (input_size x batch_size)
-            a: Matrix (input_size x hidden_size)
-        """
+    """def batched_vector_matmul(self, v, a):
+        #Compute batched vector-matrix multiplication matching Fortran dimensions.
+        #Args:
+        #    v: Batch of vectors (input_size x batch_size)
+        #    a: Matrix (input_size x hidden_size)
+        #
         input_size, batch_size = v.shape
         _, hidden_size = a.shape
 
@@ -285,6 +339,43 @@ class TensorMatrixOps:
             print(f"Error in batched_vector_matmul: {e}")
             print(f"Padded matrix:\n{a_padded}")
             print(f"Input vectors:\n{v_f}")
+            raise"""
+
+    def batched_vector_matmul(self, v, a):
+        """Compute batched vector-matrix multiplication matching Fortran dimensions.
+        Args:
+            v: Batch of vectors (input_size x batch_size)
+            a: Matrix (input_size x hidden_size)
+        """
+        input_size, batch_size = v.shape
+        _, hidden_size = a.shape
+
+        # Need to pad matrix 'a' to be square (n x n) as expected by Fortran
+        n = max(input_size, hidden_size)
+        a_padded = cp.zeros((n, n), dtype=cp.float64, order='F')
+        a_padded[:input_size, :hidden_size] = a
+
+        # Convert vectors to Fortran order and ensure column orientation
+        v_f = cp.asfortranarray(v, dtype=cp.float64)
+
+        # Create output array matching Fortran expectations
+        c_f = cp.empty((n, batch_size), dtype=cp.float64, order='F')
+
+        try:
+            self.lib.py_batched_vector_multiply(
+                ctypes.c_void_p(v_f.data.ptr),
+                ctypes.c_void_p(a_padded.data.ptr),
+                ctypes.c_void_p(c_f.data.ptr),
+                ctypes.c_int(n),
+                ctypes.c_int(batch_size)
+            )
+
+            # Extract the relevant part of the result and reshape
+            result = c_f[:hidden_size, :].T  # Transpose to get (batch_size x hidden_size)
+            return cp.asfortranarray(result)
+
+        except Exception as e:
+            print(f"Error in batched_vector_matmul: {e}")
             raise
 
     def batched_matmul(self, a, b):
