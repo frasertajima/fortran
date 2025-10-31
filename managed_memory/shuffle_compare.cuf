@@ -1,0 +1,98 @@
+module reduction_mod
+    use cudafor
+    implicit none
+contains
+    attributes(global) subroutine shared_reduction_kernel(input, output)
+        real, dimension(*) :: input
+        real :: output
+        integer :: tid, stride
+        real, shared :: sdata(32)
+
+        tid = threadIdx%x
+        sdata(tid) = input(tid)
+        call syncthreads()
+
+        ! Proper tree reduction with powers of 2
+        stride = 16
+        do while (stride > 0)
+            if (tid <= stride) then
+                sdata(tid) = sdata(tid) + sdata(tid + stride)
+            end if
+            call syncthreads()
+            stride = stride / 2
+        end do
+
+        if (tid == 1) output = sdata(1)
+    end subroutine
+
+    attributes(global) subroutine shuffle_reduction_kernel(input, output)
+        real, dimension(*) :: input
+        real :: output
+        integer :: tid, offset
+        real :: val, shuffled_val
+        integer :: val_int, result_int
+
+        tid = threadIdx%x  ! 1 to 32 in Fortran
+        val = input(tid)
+
+        ! Warp shuffle reduction with proper 1-based indexing
+        offset = 16
+        do while (offset > 0)
+            val_int = transfer(val, 0)
+            result_int = __shfl_down(val_int, offset)
+            shuffled_val = transfer(result_int, 0.0)
+            val = val + shuffled_val
+            offset = offset / 2
+        end do
+
+        ! Thread 1 has the final result (not thread 0)
+        if (tid == 1) output = val
+    end subroutine
+end module
+
+program compare_reduction
+    use reduction_mod
+    use cudafor
+    implicit none
+    integer, parameter :: N = 32
+    real, device :: d_input(N), d_output_shared, d_output_shuffle
+    real :: h_input(N), h_output_shared, h_output_shuffle
+    integer :: start, finish, rate
+    real :: time_shared, time_shuffle
+    integer :: i, istat
+
+    ! Initialize input
+    do i = 1, N
+        h_input(i) = real(i)
+    end do
+    d_input = h_input
+
+    ! Shared memory reduction
+    call system_clock(start, rate)
+    call shared_reduction_kernel<<<1, N>>>(d_input, d_output_shared)
+    istat = cudaDeviceSynchronize()
+    call system_clock(finish)
+    time_shared = real(finish - start) / real(rate)
+
+    ! Shuffle reduction
+    call system_clock(start, rate)
+    call shuffle_reduction_kernel<<<1, N>>>(d_input, d_output_shuffle)
+    istat = cudaDeviceSynchronize()
+    call system_clock(finish)
+    time_shuffle = real(finish - start) / real(rate)
+
+    ! Copy results back
+    h_output_shared = d_output_shared
+    h_output_shuffle = d_output_shuffle
+
+    ! Output results
+    print *, "Shared memory reduction time: ", time_shared, " seconds"
+    print *, "Shuffle reduction time:       ", time_shuffle, " seconds"
+    print *, "Shared result:                ", h_output_shared
+    print *, "Shuffle result:               ", h_output_shuffle
+end program
+! nvfortran shuffle_compare.cuf -o shuffle_compare
+! Shared memory reduction time:    8.6000000E-05  seconds
+! Shuffle reduction time:          1.1000000E-05  seconds
+! Shared result:                    528.0000
+! Shuffle result:                   528.0000
