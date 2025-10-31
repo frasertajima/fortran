@@ -1,0 +1,63 @@
+program transfer_compare
+  use iso_c_binding
+  implicit none
+
+  interface
+    function cudaMemcpy(dst, src, count, kind) bind(C, name="cudaMemcpy")
+      use iso_c_binding
+      type(c_ptr), value :: dst, src
+      integer(c_size_t), value :: count
+      integer(c_int), value :: kind
+      integer(c_int) :: cudaMemcpy
+    end function
+  end interface
+
+  integer, parameter :: N = 1000000
+  real, allocatable :: h_src(:), h_dst(:)
+  real, device, allocatable :: d_src(:), d_dst(:)
+  integer :: istat, start, finish, rate
+  type(c_ptr) :: p_src, p_dst
+
+  ! Constants for cudaMemcpyKind
+  integer, parameter :: cudaMemcpyHostToDevice = 1
+  integer, parameter :: cudaMemcpyDeviceToHost = 2
+
+  allocate(h_src(N), h_dst(N))
+  allocate(d_src(N), d_dst(N))
+  h_src = 1.0
+
+  ! Native CUDA Fortran transfer (copyin)
+  call system_clock(start, rate)
+  d_src = h_src
+  call system_clock(finish)
+  print *, 'Native copyin time (ms):', 1000.0 * (finish - start) / rate
+
+  ! Native CUDA Fortran transfer (copyout)
+  call system_clock(start)
+  h_dst = d_src
+  call system_clock(finish)
+  print *, 'Native copyout time (ms):', 1000.0 * (finish - start) / rate
+
+  ! C-style cudaMemcpy HostToDevice
+  p_src = c_loc(h_src(1))
+  p_dst = c_loc(d_src(1))
+  call system_clock(start)
+  istat = cudaMemcpy(p_dst, p_src, int(N * 4, c_size_t), cudaMemcpyHostToDevice)
+  call system_clock(finish)
+  print *, 'cudaMemcpy HostToDevice time (ms):', 1000.0 * (finish - start) / rate
+
+  ! C-style cudaMemcpy DeviceToHost
+  p_src = c_loc(d_src(1))
+  p_dst = c_loc(h_dst(1))
+  call system_clock(start)
+  istat = cudaMemcpy(p_dst, p_src, int(N * 4, c_size_t), cudaMemcpyDeviceToHost)
+  call system_clock(finish)
+  print *, 'cudaMemcpy DeviceToHost time (ms):', 1000.0 * (finish - start) / rate
+
+end program
+! nvfortran transfer_compare.cuf -o transfer_compare
+! Native copyin time (ms):   0.5010000
+! Native copyout time (ms):    2.144000
+! cudaMemcpy HostToDevice time (ms):   0.4050000
+! cudaMemcpy DeviceToHost time (ms):   0.6860000
+! much better to use cudaMemcpy, particularly for device to host transfers
