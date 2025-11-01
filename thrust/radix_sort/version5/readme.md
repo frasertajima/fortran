@@ -12,3 +12,5 @@ for the fortran kernel to use in python and Jupyter notebooks:
 Example run with 800,000,000 elements:
 
 <img width="748" height="1662" alt="Screenshot From 2025-11-01 08-37-44" src="https://github.com/user-attachments/assets/86ab283b-ac47-4b0f-9fc4-e1ebbce021f4" />
+
+For extremely large arrays, say 33GB, you will need about 80GB of RAM. It runs but the fortran random number generator falters (the sorting is fine, just the sample input generation runs out of numbers with very large arrays). cuRAND might fix it but actual data would be more practical rather than bothering with random numbers.
