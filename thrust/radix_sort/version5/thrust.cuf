@@ -1,0 +1,335 @@
+module thrust
+    use iso_c_binding
+    use cudafor
+    use cuda_batch_state
+    implicit none
+
+    ! Original interfaces that use *_wrapper functions
+    interface
+       subroutine sort_int(input, N) bind(C, name="sort_int_wrapper")
+         use iso_c_binding
+         integer(c_int), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_int
+
+       subroutine sort_float(input, N) bind(C, name="sort_float_wrapper")
+         use iso_c_binding
+         real(c_float), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_float
+
+       subroutine sort_double(input, N) bind(C, name="sort_double_wrapper")
+         use iso_c_binding
+         real(c_double), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine sort_double
+
+       function reduce_int(input, N) bind(C, name="reduce_int_wrapper") result(res)
+         use iso_c_binding
+         integer(c_int), device :: input(*)
+         integer(c_int), value :: N
+         integer(c_int) :: res
+       end function reduce_int
+
+       function reduce_float(input, N) bind(C, name="reduce_float_wrapper") result(res)
+         use iso_c_binding
+         real(c_float), device :: input(*)
+         integer(c_int), value :: N
+         real(c_float) :: res
+       end function reduce_float
+
+       function reduce_double(input, N) bind(C, name="reduce_double_wrapper") result(res)
+         use iso_c_binding
+         real(c_double), device :: input(*)
+         integer(c_int), value :: N
+         real(c_double) :: res
+       end function reduce_double
+
+       subroutine transform_int(input, N) bind(C, name="transform_int_wrapper")
+         use iso_c_binding
+         integer(c_int), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine transform_int
+
+       subroutine transform_float(input, N) bind(C, name="transform_float_wrapper")
+         use iso_c_binding
+         real(c_float), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine transform_float
+
+       subroutine transform_double(input, N) bind(C, name="transform_double_wrapper")
+         use iso_c_binding
+         real(c_double), device :: input(*)
+         integer(c_int), value :: N
+       end subroutine transform_double
+    end interface
+
+    ! New interfaces using *_ptr functions that work directly with device pointers
+    interface
+       subroutine sort_int_ptr(dev_ptr, N) bind(C, name="sort_int_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine sort_int_ptr
+
+       subroutine sort_float_ptr(dev_ptr, N) bind(C, name="sort_float_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine sort_float_ptr
+
+       subroutine sort_double_ptr(dev_ptr, N) bind(C, name="sort_double_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine sort_double_ptr
+
+       function reduce_int_ptr(dev_ptr, N) bind(C, name="reduce_int_ptr") result(res)
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+         integer(c_int) :: res
+       end function reduce_int_ptr
+
+       function reduce_float_ptr(dev_ptr, N) bind(C, name="reduce_float_ptr") result(res)
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+         real(c_float) :: res
+       end function reduce_float_ptr
+
+       function reduce_double_ptr(dev_ptr, N) bind(C, name="reduce_double_ptr") result(res)
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+         real(c_double) :: res
+       end function reduce_double_ptr
+
+       subroutine transform_int_ptr(dev_ptr, N) bind(C, name="transform_int_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine transform_int_ptr
+
+       subroutine transform_float_ptr(dev_ptr, N) bind(C, name="transform_float_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine transform_float_ptr
+
+       subroutine transform_double_ptr(dev_ptr, N) bind(C, name="transform_double_ptr")
+         use iso_c_binding
+         type(c_ptr), value :: dev_ptr
+         integer(c_int), value :: N
+       end subroutine transform_double_ptr
+    end interface
+
+    ! Data type constants for operations
+    integer, parameter, public :: TYPE_FLOAT = 1
+    integer, parameter, public :: TYPE_DOUBLE = 2
+    integer, parameter, public :: TYPE_INT = 3
+    
+    ! Public interfaces for operations
+    public :: optimized_sort, optimized_reduce, optimized_transform
+    
+    ! Optimized interface definitions
+    interface optimized_sort
+        module procedure optimized_sort_float
+        module procedure optimized_sort_double
+        module procedure optimized_sort_int
+    end interface optimized_sort
+    
+    interface optimized_reduce
+        module procedure optimized_reduce_float
+        module procedure optimized_reduce_double
+        module procedure optimized_reduce_int
+    end interface optimized_reduce
+    
+    interface optimized_transform
+        module procedure optimized_transform_float
+        module procedure optimized_transform_double
+        module procedure optimized_transform_int
+    end interface optimized_transform
+
+contains
+    ! Helper function to ensure CUDA resources are available
+    subroutine ensure_resources()
+        logical :: status
+        
+        call get_cuda_resources(status)
+        if (.not. status) then
+            call debug_print("Failed to initialize CUDA resources for Thrust operations")
+            stop
+        endif
+    end subroutine ensure_resources
+    
+    ! Optimized sort functions using direct device pointers
+    subroutine optimized_sort_float(input, n)
+        real(c_float), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call sort_float_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_sort_float")
+        endif
+    end subroutine optimized_sort_float
+    
+    subroutine optimized_sort_double(input, n)
+        real(c_double), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call sort_double_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_sort_double")
+        endif
+    end subroutine optimized_sort_double
+    
+    subroutine optimized_sort_int(input, n)
+        integer(c_int), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call sort_int_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_sort_int")
+        endif
+    end subroutine optimized_sort_int
+    
+    ! Optimized reduce functions using direct device pointers
+    function optimized_reduce_float(input, n) result(result_val)
+        real(c_float), device, intent(in), target :: input(n)
+        integer, intent(in) :: n
+        real(c_float) :: result_val
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        result_val = reduce_float_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_reduce_float")
+        endif
+    end function optimized_reduce_float
+    
+    function optimized_reduce_double(input, n) result(result_val)
+        real(c_double), device, intent(in), target :: input(n)
+        integer, intent(in) :: n
+        real(c_double) :: result_val
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        result_val = reduce_double_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_reduce_double")
+        endif
+    end function optimized_reduce_double
+    
+    function optimized_reduce_int(input, n) result(result_val)
+        integer(c_int), device, intent(in), target :: input(n)
+        integer, intent(in) :: n
+        integer(c_int) :: result_val
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        result_val = reduce_int_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_reduce_int")
+        endif
+    end function optimized_reduce_int
+    
+    ! Optimized transform functions using direct device pointers
+    subroutine optimized_transform_float(input, n)
+        real(c_float), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call transform_float_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_transform_float")
+        endif
+    end subroutine optimized_transform_float
+    
+    subroutine optimized_transform_double(input, n)
+        real(c_double), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call transform_double_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_transform_double")
+        endif
+    end subroutine optimized_transform_double
+    
+    subroutine optimized_transform_int(input, n)
+        integer(c_int), device, intent(inout), target :: input(n)
+        integer, intent(in) :: n
+        integer :: istat
+        
+        ! Ensure CUDA resources are initialized
+        call ensure_resources()
+        
+        ! Call the pointer-based version directly with the array address
+        call transform_int_ptr(c_loc(input), n)
+        
+        ! Check for errors
+        istat = cudaGetLastError()
+        if (istat /= cudaSuccess) then
+            call cuda_error_check(istat, "optimized_transform_int")
+        endif
+    end subroutine optimized_transform_int
+    
+end module thrust
+! make sure to use _ptr rather than _wrapper functions from C++ to avoid host-device transfers!!
