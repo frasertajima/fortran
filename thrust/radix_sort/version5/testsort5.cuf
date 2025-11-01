@@ -1,0 +1,305 @@
+program testsort5
+  use thrust
+  use cudafor
+  use iso_fortran_env
+  implicit none
+
+  integer(kind=8)                   :: n, chunk_size, num_chunks, i
+  integer(kind=8), parameter        :: max_n = 9223372036854775807_8  ! 2^63 - 1
+  integer(kind=8), parameter        :: default_chunk_size = 500000000_8  ! 500M elements (~3GB)
+  real, managed, allocatable        :: managedData(:), tempData(:)
+  real                              :: start, finish, result_sum
+  integer                           :: istat
+  character(len=100)                :: size_str
+
+  print *, '================================================'
+  print *, 'Thrust Merge-Sort with CUDA Managed Memory'
+  print *, '================================================'
+  print *, 'Globally sorts arrays larger than GPU RAM!'
+  print *, ''
+
+  ! Get array size from user with validation
+  do
+    print *, 'Enter array size (1 to ', max_n, '):'
+    print *, 'Suggestion: Try 800000000 (~3.2GB) for single-pass'
+    print *, '            or 2000000000 (~8GB) for merge-sort'
+    read *, n
+    if (n >= 1 .and. n <= max_n) exit
+    print *, 'Invalid size. Please try again.'
+  end do
+
+  ! Calculate and display array size
+  write(size_str, '(F10.2)') real(n) * 4.0 / (1024.0**3)
+  print *, 'Array size is approximately ', trim(adjustl(size_str)), ' GB'
+  print *, ''
+
+  ! Allocate managed memory
+  print *, 'Allocating managed memory...'
+  allocate(managedData(n), stat=istat)
+  if (istat /= 0) then
+    print *, 'ERROR: Failed to allocate managed memory'
+    stop
+  endif
+  print *, 'Allocation successful!'
+  print *, ''
+
+  ! Initialize with random data
+  print *, 'Initializing array with random data...'
+  call random_number(managedData)
+
+  istat = cudaDeviceSynchronize()
+  if (istat /= cudaSuccess) then
+    print *, 'CUDA error during initialization: ', istat
+    stop
+  endif
+  print *, 'Initialization complete!'
+  print *, ''
+
+  ! Display sample before sorting
+  print *, "First 20 elements before sorting:"
+  print *, managedData(1:min(20,n))
+  print *, ''
+
+  ! Perform the sort with timing
+  call cpu_time(start)
+
+  if (n > default_chunk_size) then
+    ! Use merge-sort for large arrays
+    chunk_size = default_chunk_size
+    num_chunks = (n + chunk_size - 1) / chunk_size
+
+    print *, 'Starting merge-sort operation...'
+    write(size_str, '(I0)') num_chunks
+    print *, 'Sorting ', trim(adjustl(size_str)), ' chunks, then merging...'
+    print *, ''
+
+    call merge_sort_large_array(managedData, n, chunk_size)
+
+  else
+    ! Single-pass sort for smaller arrays
+    print *, 'Starting single-pass sort operation...'
+    call optimized_sort(managedData, int(n))
+
+    istat = cudaDeviceSynchronize()
+    if (istat /= cudaSuccess) then
+      print *, 'CUDA error during sort: ', istat
+      stop
+    endif
+
+    print *, 'Sort complete!'
+  endif
+
+  call cpu_time(finish)
+  print *, ''
+
+  ! Display sample after sorting
+  print *, "First 20 elements after sorting:"
+  print *, managedData(1:min(20,n))
+  print *, ''
+
+  print *, "Last 20 elements after sorting:"
+  print *, managedData(max(1,n-19):n)
+  print *, ''
+
+  ! Verify sorting is correct
+  print *, 'Verifying sort correctness...'
+  if (verify_sorted(managedData, n)) then
+    print *, 'SUCCESS: Array is correctly sorted!'
+  else
+    print *, 'ERROR: Array is NOT correctly sorted!'
+  endif
+  print *, ''
+
+  ! Display timing
+  print *, "================================================"
+  print *, "Sort time: ", finish-start, " seconds"
+  print *, "================================================"
+  print *, ''
+
+  ! Cleanup
+  deallocate(managedData)
+  print *, 'Memory deallocated. Program complete!'
+
+contains
+
+  ! Merge-sort implementation for large arrays
+  subroutine merge_sort_large_array(data, n, chunk_size)
+    real, managed, intent(inout) :: data(n)
+    integer(kind=8), intent(in) :: n, chunk_size
+    integer(kind=8) :: num_chunks, i, start_idx, end_idx
+    integer(kind=8) :: merge_size, left_start, mid, right_end
+    real, managed, allocatable :: temp(:)
+    integer :: istat
+
+    num_chunks = (n + chunk_size - 1) / chunk_size
+
+    ! Phase 1: Sort individual chunks
+    print *, 'Phase 1: Sorting individual chunks...'
+    do i = 1, num_chunks
+      start_idx = (i - 1) * chunk_size + 1
+      end_idx = min(i * chunk_size, n)
+
+      write(size_str, '(I0, A, I0)') i, ' of ', num_chunks
+      print *, '  Chunk ', trim(adjustl(size_str))
+
+      call optimized_sort(data(start_idx:end_idx), int(end_idx - start_idx + 1))
+
+      istat = cudaDeviceSynchronize()
+      if (istat /= cudaSuccess) then
+        print *, 'CUDA error during chunk sort: ', istat
+        stop
+      endif
+    end do
+    print *, 'All chunks sorted!'
+    print *, ''
+
+    ! Phase 2: Merge sorted chunks iteratively
+    print *, 'Phase 2: Merging sorted chunks...'
+
+    ! Allocate temporary buffer for merging
+    allocate(temp(n), stat=istat)
+    if (istat /= 0) then
+      print *, 'ERROR: Failed to allocate temporary merge buffer'
+      stop
+    endif
+
+    ! Iteratively merge chunks of increasing size
+    merge_size = chunk_size
+    do while (merge_size < n)
+      print *, '  Merging chunks of size ', merge_size
+
+      do i = 1, n, 2 * merge_size
+        left_start = i
+        mid = min(i + merge_size - 1, n)
+        right_end = min(i + 2 * merge_size - 1, n)
+
+        ! Only merge if there's a right chunk
+        if (mid < right_end) then
+          call merge_chunks(data, temp, left_start, mid, right_end)
+        endif
+      end do
+
+      merge_size = merge_size * 2
+    end do
+
+    deallocate(temp)
+    print *, 'Merge complete!'
+    print *, ''
+
+  end subroutine merge_sort_large_array
+
+  ! Merge two sorted chunks
+  subroutine merge_chunks(data, temp, left_start, mid, right_end)
+    real, managed, intent(inout) :: data(:)
+    real, managed, intent(inout) :: temp(:)
+    integer(kind=8), intent(in) :: left_start, mid, right_end
+    integer(kind=8) :: i, j, k
+
+    i = left_start
+    j = mid + 1
+    k = left_start
+
+    ! Merge the two sorted sub-arrays
+    do while (i <= mid .and. j <= right_end)
+      if (data(i) <= data(j)) then
+        temp(k) = data(i)
+        i = i + 1
+      else
+        temp(k) = data(j)
+        j = j + 1
+      endif
+      k = k + 1
+    end do
+
+    ! Copy remaining elements from left sub-array
+    do while (i <= mid)
+      temp(k) = data(i)
+      i = i + 1
+      k = k + 1
+    end do
+
+    ! Copy remaining elements from right sub-array
+    do while (j <= right_end)
+      temp(k) = data(j)
+      j = j + 1
+      k = k + 1
+    end do
+
+    ! Copy merged data back to original array
+    data(left_start:right_end) = temp(left_start:right_end)
+
+  end subroutine merge_chunks
+
+  ! Verify that array is sorted
+  function verify_sorted(data, n) result(is_sorted)
+    real, managed, intent(in) :: data(n)
+    integer(kind=8), intent(in) :: n
+    logical :: is_sorted
+    integer(kind=8) :: i
+    integer(kind=8), parameter :: sample_size = 10000_8
+    integer(kind=8) :: step
+
+    is_sorted = .true.
+
+    ! For very large arrays, sample check every nth element
+    if (n > sample_size) then
+      step = n / sample_size
+      do i = 1, n - step, step
+        if (data(i) > data(i + step)) then
+          is_sorted = .false.
+          return
+        endif
+      end do
+    else
+      ! For smaller arrays, check every element
+      do i = 1, n - 1
+        if (data(i) > data(i + 1)) then
+          is_sorted = .false.
+          return
+        endif
+      end do
+    endif
+
+  end function verify_sorted
+
+end program testsort5
+
+! ================================================
+! COMPILATION AND USAGE INSTRUCTIONS
+! ================================================
+!
+! Before compiling, set the managed memory environment variable:
+!   export NVCOMPILER_CUDAFOR_DEVICE_IS_MANAGED=1
+!
+! Compile with:
+!   nvcc -c -o thrust.C.o thrust.cu -fPIC
+!   nvfortran cuda_batch_state2.o thrust.cuf testsort5.cuf thrust.C.o -c++libs -cudalib=cublas -o testsort5
+!
+! Run with:
+!   ./testsort5
+!
+! ALGORITHM:
+! Phase 1: Sort chunks using GPU Thrust (fast parallel sort)
+!   - Each chunk is sorted independently using optimized GPU sort
+!   - Chunk size = 200M elements (~800MB) to fit in GPU memory
+!
+! Phase 2: Iterative merge of sorted chunks on host
+!   - Merges pairs of sorted chunks iteratively
+!   - Merge size doubles each iteration: 200M -> 400M -> 800M -> ...
+!   - Continues until entire array is merged into one sorted array
+!   - Uses managed memory for automatic host/device paging
+!
+! PERFORMANCE NOTES:
+! - Phase 1 (GPU sort): Very fast, O(n log n) per chunk
+! - Phase 2 (CPU merge): Slower but necessary, O(n) per merge level
+! - Total: O(n log n) but with merge overhead for large arrays
+! - Trade-off: Enables sorting arrays larger than GPU memory
+!
+! EXAMPLE SIZES:
+! - 800M elements (~3.2GB): Single-pass GPU sort (fastest)
+! - 2B elements (~8GB): 10 chunks, 4 merge levels
+! - 4B elements (~16GB): 20 chunks, 5 merge levels
+! ================================================
+! chunking is fast, merging is slow. near the upper bounds of GPU memory, it is SLOWER not to chunk! 66s vs 6s!
+! to create kernel for python:
+! nvfortran -cuda -shared cuda_batch_state2.o thrust.cuf thrust.C.o -o libthrust_fortran.so -c++libs -ldl -fPIC
