@@ -3,10 +3,13 @@ Revisited thrust sort with managed memory handling for handling of very large ar
 Thrust still tests as equal to CuPy in terms of accuracy but a bit slower (except for smaller arrays). Still, CuPy will not be able to handle a 33GB array on a 4GB GPU.
 
 Compile with:
+
 `nvcc -c -o thrust.C.o thrust.cu -fPIC`
+
 `nvfortran cuda_batch_state2.o thrust.cuf testsort5.cuf thrust.C.o -c++libs -cudalib=cublas -o testsort5`
 
 for the fortran kernel to use in python and Jupyter notebooks:
+
 `nvfortran -cuda -shared cuda_batch_state2.o thrust.cuf thrust.C.o -o libthrust_fortran.so -c++libs -ldl -fPIC`
 
 Example run with 800,000,000 elements:
