@@ -13,4 +13,4 @@ Compiler returns:
 
 ! pgacclnk: child process exit status 1: /usr/bin/ld
 
-Fortunately, Claude was eventually able to create an updated example.
+Fortunately, Claude was eventually able to create an updated example. While the Claude example runs, it is difficult to know what the correct code should be given that Nvidia's example does not compile.
