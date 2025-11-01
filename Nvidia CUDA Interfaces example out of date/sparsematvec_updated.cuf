@@ -1,0 +1,128 @@
+program sparseMatVec
+  use cudafor
+  use cusparse
+  implicit none
+  integer, parameter :: n = 25
+  type(cusparseHandle) :: h
+  type(cusparseSpMatDescr) :: matA
+  type(cusparseDnVecDescr) :: vecX, vecY
+
+  ! dense data
+  real(4), managed :: Ade(n,n), x(n), y(n), x_temp(n)
+
+  ! sparse CSR arrays
+  real(4), managed, allocatable :: csrValA(:)
+  integer, managed :: csrRowPtrA(n+1)
+  integer, managed, allocatable :: csrColIndA(:)
+
+  integer :: nnz, status, i, j, idx
+  real(4) :: alpha, beta
+  integer(8) :: bufferSize
+  integer(1), managed, allocatable :: buffer(:)
+
+  ! Initialize CUSPARSE
+  status = cusparseCreate(h)
+  if (status /= CUSPARSE_STATUS_SUCCESS) then
+     write(*,*) 'cusparseCreate error: ', status
+     stop
+  endif
+
+  ! Initialize matrix (upper circular shift matrix)
+  Ade = 0.0
+  do i = 1, n-1
+     Ade(i,i+1) = 1.0
+  end do
+  Ade(n,1) = 1.0
+
+  ! Initialize vectors
+  x = [(real(i),i=1,n)]
+  y = 0.0
+  write(*,*) 'Original vector:'
+  write(*,'(5(1x,f7.2))') x
+
+  ! Manual conversion from dense to CSR format
+  idx = 0
+  csrRowPtrA(1) = 0  ! 0-based indexing for modern API
+  do i = 1, n
+     do j = 1, n
+        if (Ade(i,j) /= 0.0) then
+           idx = idx + 1
+        end if
+     end do
+     csrRowPtrA(i+1) = idx
+  end do
+  nnz = idx
+
+  allocate(csrValA(nnz), csrColIndA(nnz))
+
+  idx = 0
+  do i = 1, n
+     do j = 1, n
+        if (Ade(i,j) /= 0.0) then
+           idx = idx + 1
+           csrValA(idx) = Ade(i,j)
+           csrColIndA(idx) = j - 1  ! 0-based indexing
+        end if
+     end do
+  end do
+
+  ! Create sparse matrix descriptor
+  status = cusparseCreateCsr(matA, n, n, nnz, &
+       csrRowPtrA, csrColIndA, csrValA, &
+       CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, &
+       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F)
+
+  ! Create dense vector descriptors
+  status = cusparseCreateDnVec(vecX, n, x, CUDA_R_32F)
+  status = cusparseCreateDnVec(vecY, n, y, CUDA_R_32F)
+
+  ! y = alpha*A*x + beta*y
+  alpha = 1.0
+  beta = 0.0
+
+  ! Get buffer size
+  status = cusparseSpMV_bufferSize(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &
+       alpha, matA, vecX, beta, vecY, CUDA_R_32F, &
+       CUSPARSE_SPMV_ALG_DEFAULT, bufferSize)
+
+  allocate(buffer(bufferSize))
+
+  ! Perform SpMV
+  status = cusparseSpMV(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &
+       alpha, matA, vecX, beta, vecY, CUDA_R_32F, &
+       CUSPARSE_SPMV_ALG_DEFAULT, buffer)
+
+  status = cudaDeviceSynchronize()
+
+  write(*,*) 'Shifted vector:'
+  write(*,'(5(1x,f7.2))') y
+
+  ! Now compute x_temp = alpha*A'*y - x
+  x_temp = x
+  status = cusparseDestroyDnVec(vecX)
+  status = cusparseCreateDnVec(vecX, n, x_temp, CUDA_R_32F)
+
+  beta = -1.0
+  status = cusparseSpMV(h, CUSPARSE_OPERATION_TRANSPOSE, &
+       alpha, matA, vecY, beta, vecX, CUDA_R_32F, &
+       CUSPARSE_SPMV_ALG_DEFAULT, buffer)
+
+  status = cudaDeviceSynchronize()
+
+  write(*,*) 'Max error = ', maxval(abs(x_temp))
+
+  if (maxval(abs(x_temp)).le.1.e-5) then
+    write(*,*) 'Test PASSED'
+  else
+    write(*,*) 'Test FAILED'
+  endif
+
+  ! Cleanup
+  status = cusparseDestroySpMat(matA)
+  status = cusparseDestroyDnVec(vecX)
+  status = cusparseDestroyDnVec(vecY)
+  status = cusparseDestroy(h)
+
+end program sparseMatVec
+! nvfortran sparsematvec_updated.cuf -cudalib=cusparse -o sparsematvec
+! updated by Claude as Nvidia 25.9 document example is obsolete (https://docs.nvidia.com/hpc-sdk/compilers/fortran-cuda-interfaces/#examples) example 12.12
