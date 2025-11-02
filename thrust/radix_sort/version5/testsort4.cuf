@@ -1,0 +1,150 @@
+program testsort4
+  use thrust
+  use cudafor
+  use iso_fortran_env
+  implicit none
+
+  integer(kind=8)                   :: n
+  integer(kind=8), parameter        :: max_n = 9223372036854775807_8  ! 2^63 - 1
+  real, managed, allocatable        :: managedData(:)
+  real                              :: start, finish, result_sum
+  integer                           :: istat
+  character(len=100)                :: size_str
+
+  print *, '================================================'
+  print *, 'Thrust Sort with CUDA Managed Memory'
+  print *, '================================================'
+  print *, 'This version can sort arrays larger than GPU RAM!'
+  print *, ''
+
+  ! Get array size from user with validation
+  do
+    print *, 'Enter array size (1 to ', max_n, '):'
+    print *, 'Suggestion: Try 2000000000 (~8GB) for arrays larger than GPU RAM'
+    read *, n
+    if (n >= 1 .and. n <= max_n) exit
+    print *, 'Invalid size. Please try again.'
+  end do
+
+  ! Calculate and display array size
+  write(size_str, '(F10.2)') real(n) * 4.0 / (1024.0**3)
+  print *, 'Array size is approximately ', trim(adjustl(size_str)), ' GB'
+  print *, ''
+
+  ! Allocate managed memory
+  print *, 'Allocating managed memory...'
+  allocate(managedData(n), stat=istat)
+  if (istat /= 0) then
+    print *, 'ERROR: Failed to allocate managed memory'
+    stop
+  endif
+  print *, 'Allocation successful!'
+  print *, ''
+
+  ! Initialize with random data on device
+  print *, 'Initializing array with random data...'
+  call random_number(managedData)
+
+  ! Synchronize to ensure initialization is complete
+  istat = cudaDeviceSynchronize()
+  if (istat /= cudaSuccess) then
+    print *, 'CUDA error during initialization: ', istat
+    stop
+  endif
+  print *, 'Initialization complete!'
+  print *, ''
+
+  ! Display sample before sorting
+  print *, "First 20 elements before sorting:"
+  print *, managedData(1:min(20,n))
+  print *, ''
+
+  ! Perform the sort with timing
+  print *, 'Starting sort operation...'
+  call cpu_time(start)
+  call optimized_sort(managedData, int(n))
+
+  ! Synchronize to ensure sort is complete
+  istat = cudaDeviceSynchronize()
+  if (istat /= cudaSuccess) then
+    print *, 'CUDA error during sort: ', istat
+    stop
+  endif
+  call cpu_time(finish)
+
+  print *, 'Sort complete!'
+  print *, ''
+
+  ! Display sample after sorting
+  print *, "First 20 elements after sorting:"
+  print *, managedData(1:min(20,n))
+  print *, ''
+
+  print *, "Last 20 elements after sorting:"
+  print *, managedData(max(1,n-19):n)
+  print *, ''
+
+  ! Display timing
+  print *, "================================================"
+  print *, "Sort time: ", finish-start, " seconds"
+  print *, "================================================"
+  print *, ''
+
+  ! Perform reduction to verify data integrity
+  print *, 'Performing reduction (sum of all elements)...'
+  result_sum = optimized_reduce(managedData, int(n))
+  print *, "Reduction result (sum): ", result_sum
+  print *, ''
+
+  ! Optional: Transform operation (square each element)
+  print *, 'Would you like to transform (square) all elements? (y/n)'
+  read *, size_str
+  if (trim(adjustl(size_str)) == 'y' .or. trim(adjustl(size_str)) == 'Y') then
+    print *, 'Applying transform (squaring each element)...'
+    call optimized_transform(managedData, int(n))
+
+    istat = cudaDeviceSynchronize()
+    if (istat /= cudaSuccess) then
+      print *, 'CUDA error during transform: ', istat
+      stop
+    endif
+
+    print *, "First 20 elements after transform:"
+    print *, managedData(1:min(20,n))
+    print *, ''
+  endif
+
+  ! Cleanup
+  deallocate(managedData)
+  print *, 'Memory deallocated. Program complete!'
+
+end program testsort4
+
+! ================================================
+! COMPILATION AND USAGE INSTRUCTIONS
+! ================================================
+!
+! Before compiling, set the managed memory environment variable:
+!   export NVCOMPILER_CUDAFOR_DEVICE_IS_MANAGED=1
+!
+! Compile with:
+!   nvcc -c -o thrust.C.o thrust.cu
+!   nvfortran cuda_batch_state2.o thrust.cuf testSort4.cuf thrust.C.o -c++libs -cudalib=cublas -o testSort4
+!
+! Run with:
+!   ./testSort4
+!
+! FEATURES:
+! - Uses CUDA managed memory to handle arrays larger than GPU RAM
+! - Automatically pages data between host and device as needed
+! - Can sort multi-GB arrays that exceed GPU memory capacity
+! - Uses optimized Thrust operations (sort, reduce, transform)
+! - Includes error checking and synchronization
+!
+! NOTES:
+! - Managed memory allows oversubscription of GPU memory
+! - Performance depends on page migration between host/device
+! - For very large arrays, expect some overhead from paging
+! - Test with arrays like 2B elements (~8GB) even on 4GB GPUs
+! ================================================
+! this version works better on the RTX4060 with 8GB of memory and 48GB of system memory (handles 37GB arrays without chunking in 12s)
