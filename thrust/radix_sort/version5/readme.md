@@ -19,3 +19,8 @@ Example run with 800,000,000 elements:
 For extremely large arrays, say 33GB, you will need about 80GB of RAM. It runs but the fortran random number generator falters (the sorting is fine, just the sample input generation runs out of numbers with very large arrays). cuRAND might fix it but actual data would be more practical rather than bothering with random numbers.
 
 Also, while thrust is very fast, it also has issues with very large arrays (thus the chunking solution). On a related note, trying to sort a large array that completely fills the GPU memory resulted in 66s run times vs 6s run times for the same array that was chunked into 2 pieces. Chunking the array left room for the GPU to work properly without strain. Chunking is fast, merging the pieces together is slow so we want to cut the array into the largest pieces that the GPU can handle without strain. The current chunk size is for a 4GB A1000 GPU. It could be increased for larger GPUs without hurting performance.
+
+---
+testsort4 on an RTX4060 with 8GB RAM and 48GB system memory runs while testsort5 will crash as 48GB system memory is insufficient:
+
+<img width="494" height="938" alt="Screenshot From 2025-11-01 21-16-13" src="https://github.com/user-attachments/assets/1a0b0601-13a0-4732-acc7-4aeb908808b2" />
