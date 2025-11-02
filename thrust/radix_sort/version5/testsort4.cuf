@@ -148,3 +148,4 @@ end program testsort4
 ! - Test with arrays like 2B elements (~8GB) even on 4GB GPUs
 ! ================================================
 ! this version works better on the RTX4060 with 8GB of memory and 48GB of system memory (handles 37GB arrays without chunking in 12s)
+! try testsort4, the non-chunking version, if your system memory is not at least 2x laarger than the array size
