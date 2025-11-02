@@ -24,3 +24,6 @@ Also, while thrust is very fast, it also has issues with very large arrays (thus
 testsort4 on an RTX4060 with 8GB RAM and 48GB system memory runs while testsort5 will crash as 48GB system memory is insufficient:
 
 <img width="494" height="938" alt="Screenshot From 2025-11-01 21-16-13" src="https://github.com/user-attachments/assets/1a0b0601-13a0-4732-acc7-4aeb908808b2" />
+
+On smaller arrays, the thrust sort can get very good performance:
+<img width="538" height="942" alt="image" src="https://github.com/user-attachments/assets/e96adbd3-6c2c-4f70-82a7-b0fc43ca8da8" />
