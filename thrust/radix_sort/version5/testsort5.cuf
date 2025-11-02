@@ -301,5 +301,7 @@ end program testsort5
 ! - 4B elements (~16GB): 20 chunks, 5 merge levels
 ! ================================================
 ! chunking is fast, merging is slow. near the upper bounds of GPU memory, it is SLOWER not to chunk! 66s vs 6s!
+! Still, for systems with less than 2x the system memory of the array, tensort4 is more likely to run as it uses 
+! less system memory (and can handle arrays larger than the GPU RAM up to a point)
 ! to create kernel for python:
 ! nvfortran -cuda -shared cuda_batch_state2.o thrust.cuf thrust.C.o -o libthrust_fortran.so -c++libs -ldl -fPIC
