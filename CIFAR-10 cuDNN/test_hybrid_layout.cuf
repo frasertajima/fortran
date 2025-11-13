@@ -1,0 +1,318 @@
+! ============================================================================
+! Standalone Test: (W,H,C,N) Layout with CUDNN_TENSOR_NCHW
+! ============================================================================
+! This minimal test validates the hybrid approach before full V26 refactor:
+!   - Arrays stored as (W,H,C,N) in Fortran (column-major)
+!   - cuDNN descriptors use CUDNN_TENSOR_NCHW format
+!   - Test BatchNorm (the problematic operation)
+!
+! Expected result: BN variance should be reasonable (not exploding)
+! ============================================================================
+
+program test_hybrid_layout
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    ! ========================================================================
+    ! cuDNN Constants
+    ! ========================================================================
+    integer(c_int), parameter :: CUDNN_STATUS_SUCCESS = 0
+    integer(c_int), parameter :: CUDNN_TENSOR_NCHW = 0
+    integer(c_int), parameter :: CUDNN_DATA_FLOAT = 0
+    integer(c_int), parameter :: CUDNN_BATCHNORM_SPATIAL = 1
+
+    ! ========================================================================
+    ! cuDNN C Interface - Minimal bindings needed for this test
+    ! ========================================================================
+    interface
+        function cudnnCreate(handle) bind(c, name='cudnnCreate')
+            import :: c_ptr, c_int
+            type(c_ptr), intent(out) :: handle
+            integer(c_int) :: cudnnCreate
+        end function
+
+        function cudnnDestroy(handle) bind(c, name='cudnnDestroy')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+            integer(c_int) :: cudnnDestroy
+        end function
+
+        function cudnnCreateTensorDescriptor(desc) bind(c, name='cudnnCreateTensorDescriptor')
+            import :: c_ptr, c_int
+            type(c_ptr), intent(out) :: desc
+            integer(c_int) :: cudnnCreateTensorDescriptor
+        end function
+
+        function cudnnSetTensor4dDescriptor(desc, format, datatype, n, c, h, w) &
+                bind(c, name='cudnnSetTensor4dDescriptor')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: desc
+            integer(c_int), value :: format, datatype, n, c, h, w
+            integer(c_int) :: cudnnSetTensor4dDescriptor
+        end function
+
+        function cudnnDestroyTensorDescriptor(desc) bind(c, name='cudnnDestroyTensorDescriptor')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: desc
+            integer(c_int) :: cudnnDestroyTensorDescriptor
+        end function
+
+        function cudnnBatchNormalizationForwardTraining(handle, mode, alpha, beta, x_desc, x, y_desc, y, &
+                bn_scale_bias_mean_var_desc, bn_scale, bn_bias, exponential_average_factor, &
+                result_running_mean, result_running_variance, epsilon, result_save_mean, result_save_inv_variance) &
+                bind(c, name='cudnnBatchNormalizationForwardTraining')
+            import :: c_ptr, c_int, c_double
+            type(c_ptr), value :: handle, alpha, beta, x_desc, x, y_desc, y, bn_scale_bias_mean_var_desc
+            type(c_ptr), value :: bn_scale, bn_bias, result_running_mean, result_running_variance
+            type(c_ptr), value :: result_save_mean, result_save_inv_variance
+            integer(c_int), value :: mode
+            real(c_double), value :: exponential_average_factor, epsilon
+            integer(c_int) :: cudnnBatchNormalizationForwardTraining
+        end function
+    end interface
+
+    ! Test parameters - small size for easy verification
+    integer, parameter :: BATCH_SIZE = 4
+    integer, parameter :: CHANNELS = 8
+    integer, parameter :: HEIGHT = 8
+    integer, parameter :: WIDTH = 8
+
+    ! cuDNN handles and descriptors (using c_ptr like the main code)
+    type(c_ptr) :: cudnn_handle
+    type(c_ptr) :: data_desc, bn_param_desc
+    integer :: stat
+
+    ! Host arrays
+    real(4), allocatable :: h_input(:,:,:,:)      ! (W,H,C,N)
+    real(4), allocatable :: h_output(:,:,:,:)     ! (W,H,C,N)
+    real(4), allocatable :: h_bn_scale(:)         ! (C)
+    real(4), allocatable :: h_bn_bias(:)          ! (C)
+    real(4), allocatable :: h_running_mean(:)     ! (C)
+    real(4), allocatable :: h_running_var(:)      ! (C)
+    real(4), allocatable :: h_saved_mean(:)       ! (C)
+    real(4), allocatable :: h_saved_inv_var(:)    ! (C)
+
+    ! Device arrays (need target attribute for c_loc)
+    real(4), device, allocatable, target :: d_input(:,:,:,:)      ! (W,H,C,N)
+    real(4), device, allocatable, target :: d_output(:,:,:,:)     ! (W,H,C,N)
+    real(4), device, allocatable, target :: d_bn_scale(:)         ! (C)
+    real(4), device, allocatable, target :: d_bn_bias(:)          ! (C)
+    real(4), device, allocatable, target :: d_running_mean(:)     ! (C)
+    real(4), device, allocatable, target :: d_running_var(:)      ! (C)
+    real(4), device, allocatable, target :: d_saved_mean(:)       ! (C)
+    real(4), device, allocatable, target :: d_saved_inv_var(:)    ! (C)
+
+    ! cuDNN constants (using c_float/c_double like the main code)
+    real(c_float), target :: alpha = 1.0, beta = 0.0
+    real(c_double) :: bn_epsilon = 1.0d-5
+    real(c_double) :: bn_momentum = 0.9d0
+    integer(c_int) :: bn_mode
+
+    ! Loop variables
+    integer :: w, h, c, n
+    real(4) :: mean_val, var_val
+    logical :: all_ok
+
+    print *, "============================================================================"
+    print *, "Testing Hybrid Layout: (W,H,C,N) with CUDNN_TENSOR_NCHW"
+    print *, "============================================================================"
+    print *, "Tensor shape: W=", WIDTH, "H=", HEIGHT, "C=", CHANNELS, "N=", BATCH_SIZE
+    print *
+
+    ! ========================================================================
+    ! 1. Initialize cuDNN
+    ! ========================================================================
+    print *, "[1/7] Initializing cuDNN..."
+    stat = cudnnCreate(cudnn_handle)
+    if (stat /= CUDNN_STATUS_SUCCESS) then
+        print *, "ERROR: Failed to create cuDNN handle:", stat
+        stop 1
+    endif
+    print *, "      ✓ cuDNN handle created"
+
+    ! ========================================================================
+    ! 2. Create descriptors using CUDNN_TENSOR_NCHW (the hybrid approach!)
+    ! ========================================================================
+    print *, "[2/7] Creating cuDNN descriptors with CUDNN_TENSOR_NCHW..."
+
+    ! Data descriptor (W,H,C,N) format
+    stat = cudnnCreateTensorDescriptor(data_desc)
+    stat = cudnnSetTensor4dDescriptor(data_desc, &
+                                      CUDNN_TENSOR_NCHW, &
+                                      CUDNN_DATA_FLOAT, &
+                                      BATCH_SIZE, CHANNELS, HEIGHT, WIDTH)
+    if (stat /= CUDNN_STATUS_SUCCESS) then
+        print *, "ERROR: Failed to set data descriptor:", stat
+        stop 1
+    endif
+    print *, "      ✓ Data descriptor (NCHW format, but (W,H,C,N) memory layout)"
+
+    ! BatchNorm parameter descriptor - manually create (1, C, 1, 1) like main code
+    bn_mode = CUDNN_BATCHNORM_SPATIAL
+    stat = cudnnCreateTensorDescriptor(bn_param_desc)
+    stat = cudnnSetTensor4dDescriptor(bn_param_desc, &
+                                      CUDNN_TENSOR_NCHW, &
+                                      CUDNN_DATA_FLOAT, &
+                                      1, CHANNELS, 1, 1)
+    if (stat /= CUDNN_STATUS_SUCCESS) then
+        print *, "ERROR: Failed to set BN param descriptor:", stat
+        stop 1
+    endif
+    print *, "      ✓ BatchNorm parameter descriptor (1,C,1,1)"
+    print *
+
+    ! ========================================================================
+    ! 3. Allocate arrays
+    ! ========================================================================
+    print *, "[3/7] Allocating arrays..."
+
+    ! Host arrays
+    allocate(h_input(WIDTH, HEIGHT, CHANNELS, BATCH_SIZE))
+    allocate(h_output(WIDTH, HEIGHT, CHANNELS, BATCH_SIZE))
+    allocate(h_bn_scale(CHANNELS))
+    allocate(h_bn_bias(CHANNELS))
+    allocate(h_running_mean(CHANNELS))
+    allocate(h_running_var(CHANNELS))
+    allocate(h_saved_mean(CHANNELS))
+    allocate(h_saved_inv_var(CHANNELS))
+
+    ! Device arrays
+    allocate(d_input(WIDTH, HEIGHT, CHANNELS, BATCH_SIZE))
+    allocate(d_output(WIDTH, HEIGHT, CHANNELS, BATCH_SIZE))
+    allocate(d_bn_scale(CHANNELS))
+    allocate(d_bn_bias(CHANNELS))
+    allocate(d_running_mean(CHANNELS))
+    allocate(d_running_var(CHANNELS))
+    allocate(d_saved_mean(CHANNELS))
+    allocate(d_saved_inv_var(CHANNELS))
+
+    print *, "      ✓ Arrays allocated in (W,H,C,N) = (", WIDTH, ",", HEIGHT, ",", CHANNELS, ",", BATCH_SIZE, ")"
+    print *
+
+    ! ========================================================================
+    ! 4. Initialize data
+    ! ========================================================================
+    print *, "[4/7] Initializing test data..."
+
+    ! Initialize input with known pattern (different per channel)
+    do n = 1, BATCH_SIZE
+        do c = 1, CHANNELS
+            do h = 1, HEIGHT
+                do w = 1, WIDTH
+                    ! Pattern: channel-dependent values
+                    h_input(w,h,c,n) = real(c) + 0.1 * real(w + h + n)
+                enddo
+            enddo
+        enddo
+    enddo
+
+    ! Initialize BN parameters
+    h_bn_scale = 1.0        ! Gamma = 1
+    h_bn_bias = 0.0         ! Beta = 0
+    h_running_mean = 0.0    ! Initial running mean
+    h_running_var = 1.0     ! Initial running variance
+
+    ! Copy to device
+    d_input = h_input
+    d_bn_scale = h_bn_scale
+    d_bn_bias = h_bn_bias
+    d_running_mean = h_running_mean
+    d_running_var = h_running_var
+
+    print *, "      ✓ Test data initialized (channel-dependent pattern)"
+    print *
+
+    ! ========================================================================
+    ! 5. Run BatchNorm Forward
+    ! ========================================================================
+    print *, "[5/7] Running BatchNorm Forward..."
+
+    stat = cudnnBatchNormalizationForwardTraining( &
+        cudnn_handle, &
+        bn_mode, &
+        c_loc(alpha), c_loc(beta), &
+        data_desc, c_loc(d_input), &
+        data_desc, c_loc(d_output), &
+        bn_param_desc, &
+        c_loc(d_bn_scale), c_loc(d_bn_bias), &
+        bn_momentum, &
+        c_loc(d_running_mean), c_loc(d_running_var), &
+        bn_epsilon, &
+        c_loc(d_saved_mean), c_loc(d_saved_inv_var))
+
+    if (stat /= CUDNN_STATUS_SUCCESS) then
+        print *, "ERROR: BatchNorm forward failed:", stat
+        stop 1
+    endif
+
+    print *, "      ✓ BatchNorm forward completed"
+    print *
+
+    ! ========================================================================
+    ! 6. Verify results
+    ! ========================================================================
+    print *, "[6/7] Verifying results..."
+
+    ! Copy results back to host
+    h_output = d_output
+    h_saved_mean = d_saved_mean
+    h_saved_inv_var = d_saved_inv_var
+    h_running_mean = d_running_mean
+    h_running_var = d_running_var
+
+    print *, "      Batch statistics per channel:"
+    print *, "      Ch  |  Saved Mean  |  Saved InvVar  |  Variance"
+    print *, "      ----|--------------|----------------|------------"
+
+    do c = 1, min(CHANNELS, 8)  ! Show first 8 channels
+        ! Variance = 1 / (invvar^2) - epsilon
+        var_val = 1.0 / (h_saved_inv_var(c)**2) - real(bn_epsilon)
+        write(*, '(6x,I2,3x,"|",3x,F8.4,4x,"|",5x,F8.6,6x,"|",3x,F8.4)') &
+            c, h_saved_mean(c), h_saved_inv_var(c), var_val
+    enddo
+    print *
+
+    ! ========================================================================
+    ! 7. Check if variance is reasonable
+    ! ========================================================================
+    print *, "[7/7] Checking variance sanity..."
+
+    ! Expected: variance should be reasonable (< 10)
+    ! Bug symptom: variance explodes to 1000s
+    all_ok = .true.
+
+    do c = 1, CHANNELS
+        var_val = 1.0 / (h_saved_inv_var(c)**2) - real(bn_epsilon)
+        if (var_val > 10.0 .or. var_val < 0.0) then
+            print *, "      ✗ Channel", c, "variance is abnormal:", var_val
+            all_ok = .false.
+        endif
+    enddo
+
+    print *
+    print *, "============================================================================"
+    if (all_ok) then
+        print *, "✅ TEST PASSED! Variance is reasonable."
+        print *, "   The hybrid (W,H,C,N) + CUDNN_TENSOR_NCHW approach WORKS!"
+        print *, "   Safe to proceed with full V26 refactor."
+    else
+        print *, "❌ TEST FAILED! Variance is abnormal."
+        print *, "   The hybrid approach may have issues."
+        print *, "   Need to debug before full refactor."
+    endif
+    print *, "============================================================================"
+
+    ! ========================================================================
+    ! Cleanup
+    ! ========================================================================
+    stat = cudnnDestroyTensorDescriptor(data_desc)
+    stat = cudnnDestroyTensorDescriptor(bn_param_desc)
+    stat = cudnnDestroy(cudnn_handle)
+
+    deallocate(h_input, h_output, h_bn_scale, h_bn_bias)
+    deallocate(h_running_mean, h_running_var, h_saved_mean, h_saved_inv_var)
+    deallocate(d_input, d_output, d_bn_scale, d_bn_bias)
+    deallocate(d_running_mean, d_running_var, d_saved_mean, d_saved_inv_var)
+
+end program test_hybrid_layout
