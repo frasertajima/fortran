@@ -4,3 +4,5 @@ CIFAR-10 using cuDNN instrinics matching PyTorch in accuracy and execution speed
 
 ![IMG_2618](https://github.com/user-attachments/assets/d2fc37e6-fb55-415d-9949-15d572707220)
 cuDNN functions that were attempted
+
+Make sure to dowrload the CIFAR-10 dataset and run cifar10_data_export_verification.py to ensure the fortran program is loading the python dataset correctly.
