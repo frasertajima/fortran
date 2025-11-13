@@ -316,3 +316,4 @@ program test_hybrid_layout
     deallocate(d_running_mean, d_running_var, d_saved_mean, d_saved_inv_var)
 
 end program test_hybrid_layout
+! nvfortran -cuda -O2 test_hybrid_layout.cuf -o test_hybrid -lcudnn
