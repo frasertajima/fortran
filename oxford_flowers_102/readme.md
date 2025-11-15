@@ -61,7 +61,7 @@ python extract_mobilenet_features.py
 ### Documentation
 - **`OXFORD_EXPERIMENTS.md`**: Complete experimental results and analysis
 - **`OXFORD_WORKFLOW.md`**: Fast iteration methodology and benefits
-- **`OXFORD_README.md`**: This file
+- **`readme.md`**: This file
 
 ### Python Support
 - **`extract_mobilenet_features.py`**: Feature extraction script
