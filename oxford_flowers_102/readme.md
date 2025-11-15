@@ -1,7 +1,11 @@
 # Oxford Flowers 102 - CUDA Fortran Implementation
 
 
-https://github.com/user-attachments/assets/8cff36c1-8b4e-4566-af2e-c72debe1fd22
+
+
+https://github.com/user-attachments/assets/e44c778c-f536-4b9f-a3a0-d4e5fed165b7
+
+
 
 
 
