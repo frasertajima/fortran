@@ -1,5 +1,11 @@
 # Oxford Flowers 102 - CUDA Fortran Implementation
 
+
+https://github.com/user-attachments/assets/8cff36c1-8b4e-4566-af2e-c72debe1fd22
+
+
+
+
 ## Quick Summary
 
 We built a CUDA Fortran implementation of Oxford Flowers 102 classification that:
