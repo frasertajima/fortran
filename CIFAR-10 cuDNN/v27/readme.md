@@ -1,0 +1,1 @@
+Following Oxford Flowers 102, version 27 breaks the training into two parts: 1) loads, transposes the data for Fortran and saves it in a binary in python, 2) trains in cuDNN as before. The training results are the same but this structure makes it easier for all machine learning workflows as data loading is in the same python format.
