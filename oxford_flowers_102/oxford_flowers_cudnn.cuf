@@ -1,0 +1,1073 @@
+! ============================================================================
+! Oxford Flowers 102 - CUDA Fortran Dense Layer Training
+! ============================================================================
+!
+! This program trains ONLY a Dense(1280 → 102) layer on pre-extracted
+! MobileNetV2 features, providing a fair baseline comparison with PyTorch.
+!
+! MODULARITY:
+! - Reuses: curand_wrapper_module, apex_adam_kernels from cifar10_cudnn26.cuf
+! - New: oxford_features_data_module (binary feature loading)
+! - New: Simplified dense layer forward/backward (no convolutions!)
+!
+! TARGET: Match PyTorch's 78.84% test accuracy
+! ============================================================================
+
+! ============================================================================
+! MODULE 1: cuRAND Wrapper (REUSED from CIFAR-10)
+! ============================================================================
+! Copy the curand_wrapper_module from cifar10_cudnn26.cuf (lines 1-60)
+! This provides GPU random number generation for weight initialization
+
+module curand_wrapper_module
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    ! cuRAND constants
+    integer(c_int), parameter :: CURAND_RNG_PSEUDO_DEFAULT = 100
+    integer(c_int), parameter :: CURAND_STATUS_SUCCESS = 0
+
+    ! cuRAND interface
+    interface
+        function curandCreateGenerator(generator, rng_type) bind(c, name='curandCreateGenerator')
+            import :: c_ptr, c_int
+            type(c_ptr) :: generator
+            integer(c_int), value :: rng_type
+            integer(c_int) :: curandCreateGenerator
+        end function
+
+        function curandSetPseudoRandomGeneratorSeed(generator, seed) &
+                bind(c, name='curandSetPseudoRandomGeneratorSeed')
+            import :: c_ptr, c_int, c_long_long
+            type(c_ptr), value :: generator
+            integer(c_long_long), value :: seed
+            integer(c_int) :: curandSetPseudoRandomGeneratorSeed
+        end function
+
+        function curandGenerateUniform(generator, outputPtr, num) &
+                bind(c, name='curandGenerateUniform')
+            import :: c_ptr, c_int, c_size_t
+            type(c_ptr), value :: generator
+            type(c_ptr), value :: outputPtr
+            integer(c_size_t), value :: num
+            integer(c_int) :: curandGenerateUniform
+        end function
+
+        function curandDestroyGenerator(generator) bind(c, name='curandDestroyGenerator')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: generator
+            integer(c_int) :: curandDestroyGenerator
+        end function
+    end interface
+
+contains
+
+    subroutine fill_uniform_gpu(array, n, seed_val)
+        ! Fill GPU array with uniform random values [0, 1) using cuRAND
+        real(4), device, intent(out) :: array(:)
+        integer, intent(in) :: n
+        integer(8), intent(in) :: seed_val
+        type(c_ptr) :: generator
+        integer(c_int) :: stat
+
+        stat = curandCreateGenerator(generator, CURAND_RNG_PSEUDO_DEFAULT)
+        stat = curandSetPseudoRandomGeneratorSeed(generator, int(seed_val, c_long_long))
+        stat = curandGenerateUniform(generator, c_loc(array), int(n, c_size_t))
+        stat = curandDestroyGenerator(generator)
+    end subroutine fill_uniform_gpu
+
+end module curand_wrapper_module
+
+! ============================================================================
+! MODULE 2: Oxford Features Data Module (NEW - Simplified)
+! ============================================================================
+! Loads pre-extracted MobileNetV2 features from binary files
+! Much simpler than CIFAR-10's image loading!
+
+module oxford_features_data_module
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    ! Dataset parameters
+    integer, parameter :: TRAIN_SAMPLES = 1020
+    integer, parameter :: VAL_SAMPLES = 1020
+    integer, parameter :: TEST_SAMPLES = 6149
+    integer, parameter :: FEATURE_DIM = 1280
+    integer, parameter :: NUM_CLASSES = 102
+
+    ! GPU memory for features and labels
+    real(4), device, allocatable, public :: gpu_train_features(:,:)  ! (1020, 1280)
+    integer, device, allocatable, public :: gpu_train_labels(:)      ! (1020)
+    real(4), device, allocatable, public :: gpu_val_features(:,:)    ! (1020, 1280)
+    integer, device, allocatable, public :: gpu_val_labels(:)        ! (1020)
+    real(4), device, allocatable, public :: gpu_test_features(:,:)   ! (6149, 1280)
+    integer, device, allocatable, public :: gpu_test_labels(:)       ! (6149)
+
+    logical :: data_loaded = .false.
+
+    public :: load_oxford_features, is_data_loaded
+    public :: TRAIN_SAMPLES, VAL_SAMPLES, TEST_SAMPLES, FEATURE_DIM, NUM_CLASSES
+
+contains
+
+    subroutine load_oxford_features()
+        ! Load pre-extracted features from binary files
+        character(len=*), parameter :: FEATURES_DIR = 'oxford_features/'
+
+        real(4), allocatable :: train_features(:,:), val_features(:,:), test_features(:,:)
+        real(4), allocatable :: train_labels(:), val_labels(:), test_labels(:)
+        integer :: stat
+
+        print *, "======================================================================"
+        print *, "Loading Oxford Flowers 102 Features"
+        print *, "======================================================================"
+
+        ! Allocate host arrays
+        allocate(train_features(TRAIN_SAMPLES, FEATURE_DIM))
+        allocate(train_labels(TRAIN_SAMPLES))
+        allocate(val_features(VAL_SAMPLES, FEATURE_DIM))
+        allocate(val_labels(VAL_SAMPLES))
+        allocate(test_features(TEST_SAMPLES, FEATURE_DIM))
+        allocate(test_labels(TEST_SAMPLES))
+
+        ! Load training features and labels
+        print *, "Loading training features..."
+        open(unit=10, file=FEATURES_DIR//'features_train.bin', &
+             form='unformatted', access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "ERROR: Cannot open features_train.bin"
+            print *, "Run: python extract_mobilenet_features.py"
+            stop
+        endif
+        read(10) train_features
+        close(10)
+
+        open(unit=10, file=FEATURES_DIR//'labels_train.bin', &
+             form='unformatted', access='stream', status='old')
+        read(10) train_labels
+        close(10)
+
+        ! Load validation features and labels
+        print *, "Loading validation features..."
+        open(unit=10, file=FEATURES_DIR//'features_val.bin', &
+             form='unformatted', access='stream', status='old')
+        read(10) val_features
+        close(10)
+
+        open(unit=10, file=FEATURES_DIR//'labels_val.bin', &
+             form='unformatted', access='stream', status='old')
+        read(10) val_labels
+        close(10)
+
+        ! Load test features and labels (now in Fortran order from Python)
+        print *, "Loading test features..."
+        open(unit=10, file=FEATURES_DIR//'features_test.bin', &
+             form='unformatted', access='stream', status='old')
+        read(10) test_features
+        close(10)
+
+        open(unit=10, file=FEATURES_DIR//'labels_test.bin', &
+             form='unformatted', access='stream', status='old')
+        read(10) test_labels
+        close(10)
+
+        print *, "Features loaded successfully!"
+        print *, "  Training:   ", TRAIN_SAMPLES, " samples x ", FEATURE_DIM, " features"
+        print *, "  Validation: ", VAL_SAMPLES, " samples x ", FEATURE_DIM, " features"
+        print *, "  Test:       ", TEST_SAMPLES, " samples x ", FEATURE_DIM, " features"
+
+        ! Verify data ranges
+        print *, ""
+        print *, "Data Statistics:"
+        print *, "  Train features - Min:", minval(train_features), " Max:", maxval(train_features)
+        print *, "  Train labels - Min:", minval(train_labels), " Max:", maxval(train_labels)
+        print *, "  Val features - Min:", minval(val_features), " Max:", maxval(val_features)
+        print *, "  Val labels - Min:", minval(val_labels), " Max:", maxval(val_labels)
+        print *, "  Test features - shape:", shape(test_features)
+        print *, "  Test features - Min:", minval(test_features), " Max:", maxval(test_features)
+        print *, "  Test labels - Min:", minval(test_labels), " Max:", maxval(test_labels)
+
+        ! Allocate GPU arrays
+        allocate(gpu_train_features(TRAIN_SAMPLES, FEATURE_DIM))
+        allocate(gpu_train_labels(TRAIN_SAMPLES))
+        allocate(gpu_val_features(VAL_SAMPLES, FEATURE_DIM))
+        allocate(gpu_val_labels(VAL_SAMPLES))
+        allocate(gpu_test_features(TEST_SAMPLES, FEATURE_DIM))
+        allocate(gpu_test_labels(TEST_SAMPLES))
+
+        ! Copy to GPU
+        print *, ""
+        print *, "Transferring features to GPU..."
+        gpu_train_features = train_features
+        gpu_train_labels = int(train_labels)
+        gpu_val_features = val_features
+        gpu_val_labels = int(val_labels)
+        gpu_test_features = test_features
+        gpu_test_labels = int(test_labels)
+
+        ! Cleanup host arrays
+        deallocate(train_features, train_labels)
+        deallocate(val_features, val_labels)
+        deallocate(test_features, test_labels)
+
+        data_loaded = .true.
+        print *, "GPU transfer complete!"
+        print *, "======================================================================"
+        print *, ""
+    end subroutine load_oxford_features
+
+    function is_data_loaded() result(loaded)
+        logical :: loaded
+        loaded = data_loaded
+    end function is_data_loaded
+
+end module oxford_features_data_module
+
+! ============================================================================
+! MODULE 3: NVIDIA Apex FusedAdam (REUSED from CIFAR-10)
+! ============================================================================
+! Copy apex_adam_kernels module from cifar10_cudnn26.cuf (lines 463-572)
+! This provides the optimized Adam optimizer
+
+module apex_adam_kernels
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    ! Adam hyperparameters (matching PyTorch defaults)
+    real(4), parameter :: adam_beta1 = 0.9
+    real(4), parameter :: adam_beta2 = 0.999
+    real(4), parameter :: adam_epsilon = 1.0e-8
+    real(4), parameter :: weight_decay = 0.0  ! No weight decay by default
+
+contains
+
+    ! NVIDIA Apex FusedAdam kernel implementation
+    attributes(global) subroutine fused_adam_kernel(p, m, v, g, lr, beta1, beta2, &
+                                                     eps, grad_scale, step, bias_correction, &
+                                                     wd, eta, n)
+        real(4), device :: p(*), m(*), v(*), g(*)
+        real(4), value :: lr, beta1, beta2, eps, grad_scale, wd, eta
+        integer, value :: step, bias_correction, n
+
+        integer :: idx
+        real(4) :: scaled_grad, bias_correction1, bias_correction2, corrected_lr
+
+        idx = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (idx <= n) then
+            ! Scale gradient
+            scaled_grad = g(idx) / grad_scale
+
+            ! Add weight decay
+            if (wd /= 0.0) then
+                scaled_grad = scaled_grad + wd * p(idx)
+            endif
+
+            ! Update biased first moment estimate
+            m(idx) = beta1 * m(idx) + (1.0 - beta1) * scaled_grad
+
+            ! Update biased second raw moment estimate
+            v(idx) = beta2 * v(idx) + (1.0 - beta2) * scaled_grad * scaled_grad
+
+            ! Compute bias-corrected learning rate
+            if (bias_correction == 1) then
+                bias_correction1 = 1.0 - beta1**step
+                bias_correction2 = 1.0 - beta2**step
+                corrected_lr = lr * sqrt(bias_correction2) / bias_correction1
+            else
+                corrected_lr = lr
+            endif
+
+            ! Update parameters
+            p(idx) = p(idx) - eta * corrected_lr * m(idx) / (sqrt(v(idx)) + eps)
+        endif
+    end subroutine fused_adam_kernel
+
+    subroutine adam_update(params, grads, m, v, lr, timestep, n)
+        ! Simple wrapper for Adam update
+        real(4), device, intent(inout) :: params(:)
+        real(4), device, intent(in) :: grads(:)
+        real(4), device, intent(inout) :: m(:), v(:)
+        real(4), intent(in) :: lr
+        integer, intent(in) :: timestep, n
+
+        integer :: threads_per_block, num_blocks
+
+        threads_per_block = 256
+        num_blocks = (n + threads_per_block - 1) / threads_per_block
+
+        call fused_adam_kernel<<<num_blocks, threads_per_block>>>( &
+            params, m, v, grads, lr, adam_beta1, adam_beta2, &
+            adam_epsilon, 1.0, timestep, 1, weight_decay, 1.0, n)
+    end subroutine adam_update
+
+end module apex_adam_kernels
+
+! ============================================================================
+! MODULE 4: Dense Layer Network (NEW - Simplified)
+! ============================================================================
+! Single Dense(1280 → 102) layer with Dropout(0.2)
+! Matches PyTorch: nn.Sequential(Dropout(0.2), Linear(1280, 102))
+
+module oxford_dense_network
+    use cudafor
+    use iso_c_binding
+    use curand_wrapper_module
+    use apex_adam_kernels
+    implicit none
+
+    ! Network parameters
+    integer, parameter :: BATCH_SIZE = 32
+    integer, parameter :: INPUT_DIM = 1280
+    integer, parameter :: OUTPUT_DIM = 102
+    real(4), parameter :: DROPOUT_RATE = 0.2
+
+    ! cuBLAS handle
+    type(c_ptr) :: cublas_handle = c_null_ptr
+
+    ! Simple dense layer model
+    type :: dense_model
+        ! Weights and biases
+        real(4), device, allocatable :: weights(:,:)      ! (102, 1280)
+        real(4), device, allocatable :: bias(:)           ! (102)
+
+        ! Forward pass outputs
+        real(4), device, allocatable :: dropout_out(:,:)  ! (batch, 1280) - after dropout
+        real(4), device, allocatable :: linear_out(:,:)   ! (batch, 102) - after linear
+        real(4), device, allocatable :: softmax_out(:,:)  ! (batch, 102) - after softmax
+
+        ! Dropout mask
+        real(4), device, allocatable :: dropout_mask(:,:) ! (batch, 1280)
+
+        ! Gradients
+        real(4), device, allocatable :: grad_weights(:,:) ! (102, 1280)
+        real(4), device, allocatable :: grad_bias(:)      ! (102)
+
+        ! Adam optimizer state
+        real(4), device, allocatable :: m_weights(:,:), v_weights(:,:)
+        real(4), device, allocatable :: m_bias(:), v_bias(:)
+        integer :: adam_timestep = 0
+    end type dense_model
+
+    ! cuBLAS interface
+    interface
+        function cublasCreate_v2(handle) bind(c, name='cublasCreate_v2')
+            import :: c_ptr, c_int
+            type(c_ptr) :: handle
+            integer(c_int) :: cublasCreate_v2
+        end function
+
+        function cublasDestroy_v2(handle) bind(c, name='cublasDestroy_v2')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+            integer(c_int) :: cublasDestroy_v2
+        end function
+
+        function cublasSgemm_v2(handle, transa, transb, m, n, k, alpha, a, lda, b, ldb, &
+                beta, c, ldc) bind(c, name='cublasSgemm_v2')
+            import :: c_ptr, c_int, c_float
+            type(c_ptr), value :: handle, alpha, a, b, beta, c
+            integer(c_int), value :: transa, transb, m, n, k, lda, ldb, ldc
+            integer(c_int) :: cublasSgemm_v2
+        end function
+    end interface
+
+contains
+
+    subroutine init_cublas()
+        integer(c_int) :: stat
+        stat = cublasCreate_v2(cublas_handle)
+        if (stat /= 0) then
+            print *, "ERROR: Failed to create cuBLAS handle"
+            stop
+        endif
+    end subroutine init_cublas
+
+    subroutine cleanup_cublas()
+        integer(c_int) :: stat
+        stat = cublasDestroy_v2(cublas_handle)
+    end subroutine cleanup_cublas
+
+    subroutine init_model(model, batch_size)
+        type(dense_model), intent(out) :: model
+        integer, intent(in) :: batch_size
+
+        real(4), device, allocatable :: temp_weights(:)
+        real(4) :: std_dev
+        integer :: i, total_params
+
+        print *, "Initializing Dense Layer Model..."
+        print *, "  Architecture: Dense(1280 → 102) with Dropout(0.2)"
+
+        ! Allocate model arrays
+        allocate(model%weights(OUTPUT_DIM, INPUT_DIM))
+        allocate(model%bias(OUTPUT_DIM))
+        allocate(model%dropout_out(batch_size, INPUT_DIM))
+        allocate(model%linear_out(batch_size, OUTPUT_DIM))
+        allocate(model%softmax_out(batch_size, OUTPUT_DIM))
+        allocate(model%dropout_mask(batch_size, INPUT_DIM))
+        allocate(model%grad_weights(OUTPUT_DIM, INPUT_DIM))
+        allocate(model%grad_bias(OUTPUT_DIM))
+
+        ! Allocate Adam optimizer state
+        allocate(model%m_weights(OUTPUT_DIM, INPUT_DIM))
+        allocate(model%v_weights(OUTPUT_DIM, INPUT_DIM))
+        allocate(model%m_bias(OUTPUT_DIM))
+        allocate(model%v_bias(OUTPUT_DIM))
+
+        ! Initialize optimizer state to zero
+        model%m_weights = 0.0
+        model%v_weights = 0.0
+        model%m_bias = 0.0
+        model%v_bias = 0.0
+
+        ! Xavier/Glorot initialization: std = sqrt(2 / (fan_in + fan_out))
+        std_dev = sqrt(2.0 / real(INPUT_DIM + OUTPUT_DIM))
+
+        total_params = OUTPUT_DIM * INPUT_DIM
+        allocate(temp_weights(total_params))
+        call fill_uniform_gpu(temp_weights, total_params, int(12345, 8))
+
+        ! Convert uniform [0,1) to normal-ish distribution
+        ! temp_weights = (temp_weights - 0.5) * 2 * sqrt(3) * std_dev
+        !$cuf kernel do(1)
+        do i = 1, total_params
+            temp_weights(i) = (temp_weights(i) - 0.5) * 2.0 * sqrt(3.0) * std_dev
+        end do
+
+        ! Reshape to weights matrix
+        model%weights = reshape(temp_weights, [OUTPUT_DIM, INPUT_DIM])
+        deallocate(temp_weights)
+
+        ! Initialize bias to zero (PyTorch default)
+        model%bias = 0.0
+
+        ! Count parameters
+        total_params = OUTPUT_DIM * INPUT_DIM + OUTPUT_DIM
+        print *, "  Trainable parameters:", total_params
+        print *, "  (PyTorch baseline: 130,662 params)"
+        print *, "Model initialized!"
+        print *, ""
+    end subroutine init_model
+
+    subroutine forward_dense(model, input_features, batch_size, is_training)
+        type(dense_model), intent(inout) :: model
+        real(4), device, intent(in) :: input_features(:,:)  ! (batch, 1280)
+        integer, intent(in) :: batch_size
+        logical, intent(in) :: is_training
+
+        integer(c_int) :: stat
+        real(c_float), target :: alpha = 1.0, beta = 0.0
+        integer :: i, j
+        real(4), device, allocatable :: mask_1d(:)
+        integer :: threads_per_block, num_blocks
+        type(dim3) :: blocks, threads
+
+        ! ====================================================================
+        ! DROPOUT: Apply to input features (Dropout(0.2))
+        ! ====================================================================
+        if (is_training) then
+            ! Generate dropout mask (using 1D array for cuRAND)
+            allocate(mask_1d(batch_size * INPUT_DIM))
+            call fill_uniform_gpu(mask_1d, batch_size * INPUT_DIM, &
+                                  int(model%adam_timestep * 54321, 8))
+
+            ! Copy to 2D mask using explicit kernel
+            threads_per_block = 256
+            num_blocks = (batch_size * INPUT_DIM + threads_per_block - 1) / threads_per_block
+            call copy_mask_1d_to_2d_kernel<<<num_blocks, threads_per_block>>>( &
+                mask_1d, model%dropout_mask, batch_size, INPUT_DIM)
+            deallocate(mask_1d)
+
+            ! Apply dropout using explicit kernel
+            threads = dim3(16, 16, 1)
+            blocks = dim3((batch_size + 15) / 16, (INPUT_DIM + 15) / 16, 1)
+            call apply_dropout_kernel<<<blocks, threads>>>( &
+                model%dropout_mask, input_features, model%dropout_out, &
+                batch_size, INPUT_DIM, DROPOUT_RATE)
+        else
+            ! No dropout during inference - use kernel to copy features
+            threads = dim3(16, 16, 1)
+            blocks = dim3((batch_size + 15) / 16, (INPUT_DIM + 15) / 16, 1)
+            call copy_features_kernel<<<blocks, threads>>>( &
+                input_features, model%dropout_out, batch_size, INPUT_DIM)
+        endif
+
+        ! ====================================================================
+        ! LINEAR: Compute linear_out(batch, 102) = dropout_out(batch, 1280) * weights(102, 1280)^T
+        ! ====================================================================
+        ! For Fortran column-major: C = A * B^T
+        ! A is dropout_out(BATCH_SIZE, 1280) with LD=BATCH_SIZE (allocated size, not current batch)
+        ! B is weights(102, 1280), B^T is (1280, 102) with LD=102
+        ! C is linear_out(BATCH_SIZE, 102) with LD=BATCH_SIZE (allocated size, not current batch)
+        ! NOTE: Leading dimension must be the allocated array size, not the current batch_size
+        stat = cublasSgemm_v2(cublas_handle, 0, 1, &
+                int(batch_size, c_int), int(OUTPUT_DIM, c_int), int(INPUT_DIM, c_int), &
+                c_loc(alpha), c_loc(model%dropout_out), int(BATCH_SIZE, c_int), &
+                c_loc(model%weights), int(OUTPUT_DIM, c_int), &
+                c_loc(beta), c_loc(model%linear_out), int(BATCH_SIZE, c_int))
+
+        if (stat /= 0) print *, "ERROR: Linear forward failed:", stat
+
+        ! Add bias using explicit kernel
+        threads = dim3(16, 16, 1)
+        blocks = dim3((batch_size + 15) / 16, (OUTPUT_DIM + 15) / 16, 1)
+        call add_bias_kernel<<<blocks, threads>>>( &
+            model%linear_out, model%bias, batch_size, OUTPUT_DIM)
+
+        ! ====================================================================
+        ! SOFTMAX: Apply softmax for classification
+        ! ====================================================================
+        call apply_softmax(model%linear_out, model%softmax_out, batch_size, OUTPUT_DIM)
+
+    end subroutine forward_dense
+
+    attributes(global) subroutine softmax_kernel(input, output, batch_size, num_classes)
+        real(4), device :: input(batch_size, num_classes)
+        real(4), device :: output(batch_size, num_classes)
+        integer, value :: batch_size, num_classes
+
+        integer :: i, j
+        real(4) :: max_val, sum_exp, exp_val
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (i <= batch_size) then
+            ! Find max for numerical stability
+            max_val = input(i, 1)
+            do j = 2, num_classes
+                max_val = max(max_val, input(i, j))
+            end do
+
+            ! Compute exp and sum
+            sum_exp = 0.0
+            do j = 1, num_classes
+                exp_val = exp(input(i, j) - max_val)
+                output(i, j) = exp_val
+                sum_exp = sum_exp + exp_val
+            end do
+
+            ! Normalize
+            do j = 1, num_classes
+                output(i, j) = output(i, j) / sum_exp
+            end do
+        endif
+    end subroutine softmax_kernel
+
+    subroutine apply_softmax(input, output, batch_size, num_classes)
+        real(4), device, intent(in) :: input(:,:)
+        real(4), device, intent(out) :: output(:,:)
+        integer, intent(in) :: batch_size, num_classes
+
+        integer :: threads_per_block, num_blocks
+
+        threads_per_block = 256
+        num_blocks = (batch_size + threads_per_block - 1) / threads_per_block
+
+        call softmax_kernel<<<num_blocks, threads_per_block>>>( &
+            input, output, batch_size, num_classes)
+    end subroutine apply_softmax
+
+    ! Helper kernels for operations on model arrays
+    attributes(global) subroutine copy_mask_1d_to_2d_kernel(mask_1d, mask_2d, batch_size, input_dim)
+        real(4), device :: mask_1d(*), mask_2d(batch_size, input_dim)
+        integer, value :: batch_size, input_dim
+        integer :: i, row, col
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        if (i <= batch_size * input_dim) then
+            row = (i - 1) / input_dim + 1
+            col = mod(i - 1, input_dim) + 1
+            mask_2d(row, col) = mask_1d(i)
+        endif
+    end subroutine copy_mask_1d_to_2d_kernel
+
+    attributes(global) subroutine apply_dropout_kernel(mask, input, output, batch_size, input_dim, dropout_rate)
+        real(4), device :: mask(batch_size, input_dim), input(batch_size, input_dim), output(batch_size, input_dim)
+        integer, value :: batch_size, input_dim
+        real(4), value :: dropout_rate
+        integer :: i, j
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if (i <= batch_size .and. j <= input_dim) then
+            if (mask(i, j) < dropout_rate) then
+                output(i, j) = 0.0
+            else
+                output(i, j) = input(i, j) / (1.0 - dropout_rate)
+            endif
+        endif
+    end subroutine apply_dropout_kernel
+
+    attributes(global) subroutine add_bias_kernel(linear_out, bias, batch_size, output_dim)
+        real(4), device :: linear_out(batch_size, output_dim), bias(output_dim)
+        integer, value :: batch_size, output_dim
+        integer :: i, j
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if (i <= batch_size .and. j <= output_dim) then
+            linear_out(i, j) = linear_out(i, j) + bias(j)
+        endif
+    end subroutine add_bias_kernel
+
+    attributes(global) subroutine compute_gradient_kernel(grad_output, softmax_out, labels, batch_size, output_dim)
+        real(4), device :: grad_output(batch_size, output_dim), softmax_out(batch_size, output_dim)
+        integer, device :: labels(batch_size)
+        integer, value :: batch_size, output_dim
+        integer :: i, j
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if (i <= batch_size .and. j <= output_dim) then
+            if (labels(i) == (j - 1)) then
+                grad_output(i, j) = (softmax_out(i, j) - 1.0) / real(batch_size)
+            else
+                grad_output(i, j) = softmax_out(i, j) / real(batch_size)
+            endif
+        endif
+    end subroutine compute_gradient_kernel
+
+    attributes(global) subroutine sum_bias_gradient_kernel(grad_output, grad_bias, batch_size, output_dim)
+        real(4), device :: grad_output(batch_size, output_dim), grad_bias(output_dim)
+        integer, value :: batch_size, output_dim
+        integer :: j, i
+        real(4) :: sum_val
+
+        j = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (j <= output_dim) then
+            sum_val = 0.0
+            do i = 1, batch_size
+                sum_val = sum_val + grad_output(i, j)
+            end do
+            grad_bias(j) = sum_val
+        endif
+    end subroutine sum_bias_gradient_kernel
+
+    ! Copy kernel for inference dropout bypass
+    attributes(global) subroutine copy_features_kernel(src, dst, batch_size, feature_dim)
+        real(4), device :: src(:,:), dst(:,:)
+        integer, value :: batch_size, feature_dim
+        integer :: i, j
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if (i <= batch_size .and. j <= feature_dim) then
+            dst(i, j) = src(i, j)
+        endif
+    end subroutine copy_features_kernel
+
+    ! Kernel for gathering batch from full dataset
+    attributes(global) subroutine gather_batch_kernel(full_data, batch_data, batch_start, batch_size, &
+                                                       feature_dim, total_samples)
+        real(4), device :: full_data(total_samples, feature_dim), batch_data(batch_size, feature_dim)
+        integer, value :: batch_start, batch_size, feature_dim, total_samples
+        integer :: i, j, src_idx
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if (i <= batch_size .and. j <= feature_dim) then
+            src_idx = batch_start + i - 1
+            batch_data(i, j) = full_data(src_idx, j)
+        endif
+    end subroutine gather_batch_kernel
+
+    attributes(global) subroutine gather_batch_labels_kernel(full_labels, batch_labels, batch_start, &
+                                                              batch_size, total_samples)
+        integer, device :: full_labels(total_samples), batch_labels(batch_size)
+        integer, value :: batch_start, batch_size, total_samples
+        integer :: i, src_idx
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (i <= batch_size) then
+            src_idx = batch_start + i - 1
+            batch_labels(i) = full_labels(src_idx)
+        endif
+    end subroutine gather_batch_labels_kernel
+
+    ! Kernels for flattening/unflattening 2D arrays
+    attributes(global) subroutine flatten_2d_to_1d_kernel(array_2d, array_1d, rows, cols)
+        real(4), device :: array_2d(rows, cols), array_1d(*)
+        integer, value :: rows, cols
+        integer :: i, row, col
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (i <= rows * cols) then
+            row = mod(i - 1, rows) + 1
+            col = (i - 1) / rows + 1
+            array_1d(i) = array_2d(row, col)
+        endif
+    end subroutine flatten_2d_to_1d_kernel
+
+    attributes(global) subroutine unflatten_1d_to_2d_kernel(array_1d, array_2d, rows, cols)
+        real(4), device :: array_1d(*), array_2d(rows, cols)
+        integer, value :: rows, cols
+        integer :: i, row, col
+
+        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+
+        if (i <= rows * cols) then
+            row = mod(i - 1, rows) + 1
+            col = (i - 1) / rows + 1
+            array_2d(row, col) = array_1d(i)
+        endif
+    end subroutine unflatten_1d_to_2d_kernel
+
+    subroutine backward_dense(model, labels, batch_size, learning_rate, is_training)
+        type(dense_model), intent(inout) :: model
+        integer, device, intent(in) :: labels(:)  ! (batch)
+        integer, intent(in) :: batch_size
+        real(4), intent(in) :: learning_rate
+        logical, intent(in) :: is_training
+
+        integer(c_int) :: stat
+        real(c_float), target :: alpha = 1.0, beta = 0.0, scale
+        real(4), device, allocatable, target :: grad_output(:,:)  ! (batch, 102)
+        integer :: i, j
+        real(4), device, allocatable :: weights_1d(:), grad_weights_1d(:)
+        real(4), device, allocatable :: m_weights_1d(:), v_weights_1d(:)
+        type(dim3) :: blocks, threads
+        integer :: threads_per_block, num_blocks
+
+        allocate(grad_output(batch_size, OUTPUT_DIM))
+
+        ! ====================================================================
+        ! SOFTMAX + CROSS-ENTROPY GRADIENT
+        ! ====================================================================
+        ! For softmax + cross-entropy: grad = (softmax_output - one_hot_labels) / batch_size
+        threads = dim3(16, 16, 1)
+        blocks = dim3((batch_size + 15) / 16, (OUTPUT_DIM + 15) / 16, 1)
+        call compute_gradient_kernel<<<blocks, threads>>>( &
+            grad_output, model%softmax_out, labels, batch_size, OUTPUT_DIM)
+
+        ! ====================================================================
+        ! LINEAR BACKWARD: Compute gradients for weights and bias
+        ! ====================================================================
+
+        ! Zero gradients
+        model%grad_weights = 0.0
+        model%grad_bias = 0.0
+
+        ! Gradient for weights: grad_weights(102, 1280) = grad_output(batch, 102)^T * dropout_out(batch, 1280)
+        ! For Fortran column-major: C = A^T * B
+        ! A is grad_output(BATCH_SIZE, 102), A^T is (102, BATCH_SIZE) with LD=BATCH_SIZE
+        ! B is dropout_out(BATCH_SIZE, 1280) with LD=BATCH_SIZE
+        ! C is grad_weights(102, 1280) with LD=102
+        ! NOTE: Leading dimension must be the allocated array size, not the current batch_size
+        stat = cublasSgemm_v2(cublas_handle, 1, 0, &
+                int(OUTPUT_DIM, c_int), int(INPUT_DIM, c_int), int(batch_size, c_int), &
+                c_loc(alpha), c_loc(grad_output), int(BATCH_SIZE, c_int), &
+                c_loc(model%dropout_out), int(BATCH_SIZE, c_int), &
+                c_loc(beta), c_loc(model%grad_weights), int(OUTPUT_DIM, c_int))
+
+        if (stat /= 0) print *, "ERROR: Gradient weights computation failed:", stat
+
+        ! Gradient for bias: sum over batch dimension using explicit kernel
+        threads_per_block = 256
+        num_blocks = (OUTPUT_DIM + threads_per_block - 1) / threads_per_block
+        call sum_bias_gradient_kernel<<<num_blocks, threads_per_block>>>( &
+            grad_output, model%grad_bias, batch_size, OUTPUT_DIM)
+
+        ! ====================================================================
+        ! ADAM OPTIMIZER UPDATE
+        ! ====================================================================
+        if (is_training) then
+            model%adam_timestep = model%adam_timestep + 1
+
+            ! Update weights (need 1D arrays for adam_update)
+            allocate(weights_1d(OUTPUT_DIM * INPUT_DIM))
+            allocate(grad_weights_1d(OUTPUT_DIM * INPUT_DIM))
+            allocate(m_weights_1d(OUTPUT_DIM * INPUT_DIM))
+            allocate(v_weights_1d(OUTPUT_DIM * INPUT_DIM))
+
+            ! Flatten 2D to 1D using explicit kernels
+            threads_per_block = 256
+            num_blocks = (OUTPUT_DIM * INPUT_DIM + threads_per_block - 1) / threads_per_block
+
+            call flatten_2d_to_1d_kernel<<<num_blocks, threads_per_block>>>( &
+                model%weights, weights_1d, OUTPUT_DIM, INPUT_DIM)
+            call flatten_2d_to_1d_kernel<<<num_blocks, threads_per_block>>>( &
+                model%grad_weights, grad_weights_1d, OUTPUT_DIM, INPUT_DIM)
+            call flatten_2d_to_1d_kernel<<<num_blocks, threads_per_block>>>( &
+                model%m_weights, m_weights_1d, OUTPUT_DIM, INPUT_DIM)
+            call flatten_2d_to_1d_kernel<<<num_blocks, threads_per_block>>>( &
+                model%v_weights, v_weights_1d, OUTPUT_DIM, INPUT_DIM)
+
+            ! Update
+            call adam_update(weights_1d, grad_weights_1d, m_weights_1d, v_weights_1d, &
+                           learning_rate, model%adam_timestep, OUTPUT_DIM * INPUT_DIM)
+
+            ! Unflatten 1D back to 2D using explicit kernels
+            call unflatten_1d_to_2d_kernel<<<num_blocks, threads_per_block>>>( &
+                weights_1d, model%weights, OUTPUT_DIM, INPUT_DIM)
+            call unflatten_1d_to_2d_kernel<<<num_blocks, threads_per_block>>>( &
+                m_weights_1d, model%m_weights, OUTPUT_DIM, INPUT_DIM)
+            call unflatten_1d_to_2d_kernel<<<num_blocks, threads_per_block>>>( &
+                v_weights_1d, model%v_weights, OUTPUT_DIM, INPUT_DIM)
+
+            deallocate(weights_1d, grad_weights_1d, m_weights_1d, v_weights_1d)
+
+            ! Update bias (already 1D, can call directly)
+            call adam_update(model%bias, model%grad_bias, &
+                           model%m_bias, model%v_bias, &
+                           learning_rate, model%adam_timestep, OUTPUT_DIM)
+        endif
+
+        deallocate(grad_output)
+    end subroutine backward_dense
+
+    subroutine evaluate_model(model, features, labels, num_samples, loss, accuracy)
+        type(dense_model), intent(inout) :: model
+        real(4), device, intent(in) :: features(:,:)
+        integer, device, intent(in) :: labels(:)
+        integer, intent(in) :: num_samples
+        real(4), intent(out) :: loss, accuracy
+
+        integer :: num_batches, batch_idx, batch_start, batch_end, current_batch_size
+        integer :: i, j, correct, predicted_class, label_idx
+        real(4) :: total_loss, prob, max_prob
+        real(4), device, allocatable :: batch_features(:,:)
+        integer, device, allocatable :: batch_labels(:)
+        real(4), allocatable :: host_softmax(:,:)
+        integer, allocatable :: host_labels(:)
+
+        allocate(batch_features(BATCH_SIZE, INPUT_DIM))
+        allocate(batch_labels(BATCH_SIZE))
+        allocate(host_softmax(BATCH_SIZE, OUTPUT_DIM))
+        allocate(host_labels(BATCH_SIZE))
+
+        num_batches = (num_samples + BATCH_SIZE - 1) / BATCH_SIZE
+        total_loss = 0.0
+        correct = 0
+
+        do batch_idx = 1, num_batches
+            batch_start = (batch_idx - 1) * BATCH_SIZE + 1
+            batch_end = min(batch_idx * BATCH_SIZE, num_samples)
+            current_batch_size = batch_end - batch_start + 1
+
+            ! Gather batch using explicit kernels
+            block
+                type(dim3) :: blocks, threads
+                integer :: threads_1d
+
+                ! Gather features
+                threads = dim3(16, 16, 1)
+                blocks = dim3((current_batch_size + 15) / 16, (INPUT_DIM + 15) / 16, 1)
+                call gather_batch_kernel<<<blocks, threads>>>( &
+                    features, batch_features, batch_start, current_batch_size, INPUT_DIM, num_samples)
+
+                ! Gather labels
+                threads_1d = 256
+                blocks = dim3((current_batch_size + threads_1d - 1) / threads_1d, 1, 1)
+                call gather_batch_labels_kernel<<<blocks, threads_1d>>>( &
+                    labels, batch_labels, batch_start, current_batch_size, num_samples)
+            end block
+
+            ! Forward pass (no training)
+            call forward_dense(model, batch_features, current_batch_size, .false.)
+
+            ! Copy device arrays to host for CPU processing
+            host_softmax = model%softmax_out
+            host_labels = batch_labels
+
+            ! Compute loss and accuracy using HOST arrays
+            do i = 1, current_batch_size
+                label_idx = host_labels(i)
+
+                ! Cross-entropy loss
+                prob = host_softmax(i, label_idx + 1)
+                total_loss = total_loss - log(max(prob, 1.0e-7))
+
+                ! Accuracy: find predicted class
+                max_prob = host_softmax(i, 1)
+                predicted_class = 0
+                do j = 2, OUTPUT_DIM
+                    if (host_softmax(i, j) > max_prob) then
+                        max_prob = host_softmax(i, j)
+                        predicted_class = j - 1
+                    endif
+                end do
+
+                if (predicted_class == label_idx) then
+                    correct = correct + 1
+                endif
+            end do
+        end do
+
+        loss = total_loss / real(num_samples)
+        accuracy = real(correct) / real(num_samples)
+
+        deallocate(batch_features, batch_labels, host_softmax, host_labels)
+    end subroutine evaluate_model
+
+end module oxford_dense_network
+
+! ============================================================================
+! MAIN PROGRAM: Training Loop
+! ============================================================================
+
+program oxford_flowers_training
+    use cudafor
+    use oxford_features_data_module
+    use oxford_dense_network
+    implicit none
+
+    type(dense_model) :: model
+
+    ! Training hyperparameters (matching PyTorch)
+    integer, parameter :: MAX_EPOCHS = 100
+    integer, parameter :: PATIENCE = 15
+    real(4), parameter :: LEARNING_RATE = 0.001  ! NAdam default
+
+    ! Training state
+    integer :: epoch, batch_idx, num_batches, batch_start, batch_end, current_batch_size
+    integer :: patience_counter, best_epoch
+    real(4) :: train_loss, train_acc, val_loss, val_acc, test_loss, test_acc
+    real(4) :: best_val_loss, best_val_acc
+    real(4), device, allocatable :: batch_features(:,:)
+    integer, device, allocatable :: batch_labels(:)
+
+    ! Timing
+    real(8) :: start_time, end_time, total_time
+
+    print *, "======================================================================"
+    print *, "Oxford Flowers 102 - CUDA Fortran Dense Layer Training"
+    print *, "======================================================================"
+    print *, ""
+    print *, "Hybrid Framework: PyTorch (features) + CUDA Fortran (training)"
+    print *, "Target: Match PyTorch baseline (78.84% test accuracy)"
+    print *, ""
+
+    ! Initialize
+    call load_oxford_features()
+    call init_cublas()
+    call init_model(model, BATCH_SIZE)
+
+    ! Allocate batch arrays (device)
+    allocate(batch_features(BATCH_SIZE, FEATURE_DIM))
+    allocate(batch_labels(BATCH_SIZE))
+
+    ! NOTE: Shuffling disabled for initial testing
+    ! Will add back once we verify the training loop works
+
+    ! Initialize training state
+    best_val_loss = 1.0e9
+    best_val_acc = 0.0
+    patience_counter = 0
+    best_epoch = 0
+
+    print *, "======================================================================"
+    print *, "Training Started"
+    print *, "======================================================================"
+    print *, ""
+
+    call cpu_time(start_time)
+
+    do epoch = 1, MAX_EPOCHS
+        ! ====================================================================
+        ! TRAINING PHASE
+        ! ====================================================================
+
+        ! Train on batches (no shuffling for initial test)
+        num_batches = (TRAIN_SAMPLES + BATCH_SIZE - 1) / BATCH_SIZE
+
+        do batch_idx = 1, num_batches
+            batch_start = (batch_idx - 1) * BATCH_SIZE + 1
+            batch_end = min(batch_idx * BATCH_SIZE, TRAIN_SAMPLES)
+            current_batch_size = batch_end - batch_start + 1
+
+            ! Gather batch using explicit kernels to avoid cudaMemcpy2D
+            block
+                type(dim3) :: blocks, threads
+                integer :: threads_1d
+
+                ! Gather features
+                threads = dim3(16, 16, 1)
+                blocks = dim3((current_batch_size + 15) / 16, (FEATURE_DIM + 15) / 16, 1)
+                call gather_batch_kernel<<<blocks, threads>>>( &
+                    gpu_train_features, batch_features, batch_start, current_batch_size, &
+                    FEATURE_DIM, TRAIN_SAMPLES)
+
+                ! Gather labels
+                threads_1d = 256
+                blocks = dim3((current_batch_size + threads_1d - 1) / threads_1d, 1, 1)
+                call gather_batch_labels_kernel<<<blocks, threads_1d>>>( &
+                    gpu_train_labels, batch_labels, batch_start, current_batch_size, TRAIN_SAMPLES)
+            end block
+
+            ! Forward pass
+            call forward_dense(model, batch_features, current_batch_size, .true.)
+
+            ! Backward pass and update
+            call backward_dense(model, batch_labels, current_batch_size, LEARNING_RATE, .true.)
+        end do
+
+        ! ====================================================================
+        ! VALIDATION PHASE
+        ! ====================================================================
+        call evaluate_model(model, gpu_train_features, gpu_train_labels, TRAIN_SAMPLES, train_loss, train_acc)
+        call evaluate_model(model, gpu_val_features, gpu_val_labels, VAL_SAMPLES, val_loss, val_acc)
+
+        ! Print epoch results
+        print '(A,I3,A,I3,A,A,F7.4,A,F7.4,A,A,F7.4,A,F7.4)', &
+            'Epoch [', epoch, '/', MAX_EPOCHS, '] ', &
+            'Train Loss: ', train_loss, ' Acc: ', train_acc, ' | ', &
+            'Val Loss: ', val_loss, ' Acc: ', val_acc
+
+        ! Early stopping check
+        if (val_loss < best_val_loss) then
+            best_val_loss = val_loss
+            best_val_acc = val_acc
+            best_epoch = epoch
+            patience_counter = 0
+            ! TODO: Save best model weights here
+        else
+            patience_counter = patience_counter + 1
+            if (patience_counter >= PATIENCE) then
+                print *, ""
+                print *, "Early stopping triggered after", epoch, "epochs"
+                exit
+            endif
+        end if
+    end do
+
+    ! ====================================================================
+    ! FINAL TEST EVALUATION
+    ! ====================================================================
+    call cpu_time(end_time)
+    total_time = end_time - start_time
+
+    print *, ""
+    print *, "======================================================================"
+    print *, "Training completed!"
+    print *, "======================================================================"
+
+    ! Evaluate on test set
+    call evaluate_model(model, gpu_test_features, gpu_test_labels, TEST_SAMPLES, test_loss, test_acc)
+
+    ! Print final results in same format as epoch lines
+    print '(A,F7.4,A,F7.4,A,A,F7.4,A,F7.4)', &
+        'Final    -  Train Loss: ', train_loss, ' Acc: ', train_acc, ' | ', &
+        'Test Loss: ', test_loss, ' Acc: ', test_acc
+    print *, ""
+    print '(A,F8.2,A)', ' Total training time: ', total_time, ' seconds'
+    print '(A,I5,A,F6.2,A)', ' Best validation: Epoch ', best_epoch, ', Acc: ', best_val_acc * 100, '%'
+    print '(A,F6.2,A)', ' Test accuracy: ', test_acc * 100, '% (PyTorch baseline: 78.84%)'
+    print *, "======================================================================"
+
+    ! Cleanup
+    deallocate(batch_features, batch_labels)
+    call cleanup_cublas()
+
+end program oxford_flowers_training
