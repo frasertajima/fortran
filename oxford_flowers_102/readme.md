@@ -203,7 +203,7 @@ If you use this work, please cite:
 ```
 Oxford Flowers 102 CUDA Fortran Implementation
 Fast iteration for ML research using modular CUDA Fortran
-https://github.com/[your-repo]/CIFAR-10
+https://github.com/frasertajima/fortran/edit/main/oxford_flowers_102/
 ```
 
 ## License
