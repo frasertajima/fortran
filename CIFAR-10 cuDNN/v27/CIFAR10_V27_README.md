@@ -12,22 +12,20 @@ This follows the successful pattern from Oxford Flowers 102 and makes CIFAR-10 t
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Stage 1: Python (Data Preprocessing)                           │
+│  Stage 1: Python (Data Preprocessing)                            │
 │  ─────────────────────────────────────────────────────────────   │
-│  • Load CIFAR-10 dataset                                        │
-│  • Normalize images [0, 1]                                      │
-│  • Transpose for Fortran column-major order                     │
-│  • Save to binary files                                         │
-│  Runtime: ~2-5 seconds (one-time)                              │
+│  • Load CIFAR-10 dataset                                         │
+│  • Normalize images [0, 1]                                       │
+│  • Transpose for Fortran column-major order                      │
+│  • Save to binary files                                          │
 └──────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────────────┐
-│  Stage 2: CUDA Fortran (Fast Training)                          │
+│  Stage 2: CUDA Fortran (Fast Training)                           │
 │  ─────────────────────────────────────────────────────────────   │
-│  • Load binary files (simple!)                                  │
-│  • Train 3-layer CNN on GPU                                     │
-│  • cuDNN convolutions + custom kernels                          │
-│  Runtime: ~5-10 seconds for full training                      │
+│  • Load binary files (simple!)                                   │
+│  • Train 3-layer CNN on GPU                                      │
+│  • cuDNN convolutions + custom kernels                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +58,7 @@ cifar10_data/
 ./cifar10_cudnn_v27
 ```
 
-**Expected Performance**: ~85-90% test accuracy in ~5-10 seconds
+**Expected Performance**: ~85-90% test accuracy in ~52 seconds on RTX 4060
 
 ## Data Format
 
@@ -89,7 +87,7 @@ Fortran reads the transposed data and flattens to (N, 3072) for CNN processing. 
 | **Preprocessing** | Manual Fortran normalization | Familiar Python code |
 | **Accessibility** | Fortran expertise needed | Python skills sufficient |
 | **Debugging** | Hard to verify data | Easy Python verification |
-| **Training Speed** | ~5-10 seconds | ~5-10 seconds (same!) |
+| **Training Speed** | ~3.5 seconds/epoch | ~3.5 seconds/epoch (same!) |
 | **Code Lines** | ~600 lines data loading | ~150 lines data loading |
 
 ## CNN Architecture (Same as v26)
@@ -131,7 +129,7 @@ CIFAR-10/
 |-------------------|--------------|
 | Python: Extract MobileNetV2 features | Python: Load & normalize images |
 | Fortran: Train Dense(1280→102) | Fortran: Train full CNN |
-| Runtime: ~1 second | Runtime: ~5-10 seconds |
+| Runtime: ~1 second/100 epochs | Runtime: ~3.5 seconds/epoch |
 | Accuracy: 78.94% (beats PyTorch!) | Accuracy: ~85-90% |
 
 **Same philosophy**: Python handles data, Fortran handles fast training!
@@ -179,20 +177,6 @@ read(10) train_images
 call train_cnn(model, train_images, train_labels)
 ```
 
-**Clean separation of concerns!**
-
-## Performance
-
-### Data Preparation (One-Time)
-- Download CIFAR-10: ~2 seconds
-- Load & preprocess: ~1-2 seconds
-- Save binary files: ~1 second
-- **Total**: ~5 seconds (only run once)
-
-### Training (Every Run)
-- Load binary files: ~0.5 seconds
-- Train CNN (10 epochs): ~5-10 seconds
-- **Total**: ~5-10 seconds
 
 **Iteration speed**: Same as v26, more accessible!
 
