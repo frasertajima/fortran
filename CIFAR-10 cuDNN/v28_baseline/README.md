@@ -2,6 +2,12 @@
 
 **High-performance, modular CNN training framework in CUDA Fortran**
 
+
+
+https://github.com/user-attachments/assets/2d4ee22e-4a07-47cd-9afe-81e2bfb617fb
+
+
+
 ## 🎯 What's Here
 
 This repository contains the **v28 Baseline** - a production-ready, modular CUDA Fortran framework for training CNNs on GPU.
