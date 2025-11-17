@@ -74,7 +74,7 @@ python prepare_cifar10.py
 
 ```bash
 # Coming soon: compile script
-nvfortran -O3 -gpu=cc80 -Mcuda \
+nvfortran -O3 -cuda \
   ../../common/random_utils.cuf \
   ../../common/adam_optimizer.cuf \
   ../../common/gpu_batch_extraction.cuf \
