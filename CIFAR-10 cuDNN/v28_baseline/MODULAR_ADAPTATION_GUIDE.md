@@ -1,14 +1,16 @@
 # v28 Modular Framework - Adaptation Guide
 
 **Framework**: v28 Baseline CUDA Fortran CNN Training
+
 **Status**: ✅ Production-Ready & Validated
+
 **Performance**: 2× faster than PyTorch with full modularity
 
 ---
 
 ## Executive Summary
 
-The v28 Baseline framework is a **truly modular** CUDA Fortran training system that enables:
+The v28 Baseline framework is a **modular** CUDA Fortran training system that enables:
 - Adding new datasets in <2 hours with ~300 lines of code
 - Adapting to different image dimensions (tested: 28×28×1 to 32×32×3)
 - 100% code reuse of training logic across all datasets
@@ -18,7 +20,7 @@ The v28 Baseline framework is a **truly modular** CUDA Fortran training system t
 
 ---
 
-## How the Framework Achieves True Modularity
+## How the Framework Achieves Modularity
 
 ### Architecture Overview
 
@@ -26,10 +28,10 @@ The v28 Baseline framework is a **truly modular** CUDA Fortran training system t
 ┌─────────────────────────────────────────────────────────┐
 │              COMMON MODULES (100% Reusable)             │
 ├─────────────────────────────────────────────────────────┤
-│  random_utils.cuf       │ cuRAND wrapper               │
-│  adam_optimizer.cuf     │ NVIDIA Apex FusedAdam        │
-│  gpu_batch_extraction.cuf│ Zero-copy batching          │
-│  cuda_utils.cuf         │ GPU scheduling & utilities   │
+│  random_utils.cuf        │ cuRAND wrapper               │
+│  adam_optimizer.cuf      │ NVIDIA Apex FusedAdam        │
+│  gpu_batch_extraction.cuf│ Zero-copy batching           │
+│  cuda_utils.cuf          │ GPU scheduling & utilities   │
 └─────────────────────────────────────────────────────────┘
                            ▲
                            │ imports & uses
@@ -37,9 +39,9 @@ The v28 Baseline framework is a **truly modular** CUDA Fortran training system t
 ┌─────────────────────────────────────────────────────────┐
 │         DATASET-SPECIFIC MODULES (~150 lines each)      │
 ├─────────────────────────────────────────────────────────┤
-│  dataset_config.cuf     │ Parameters & data loading    │
-│  dataset_main.cuf       │ Instantiate with parameters  │
-│  prepare_dataset.py     │ Python preprocessing         │
+│  dataset_config.cuf     │ Parameters & data loading     │
+│  dataset_main.cuf       │ Instantiate with parameters   │
+│  prepare_dataset.py     │ Python preprocessing          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -384,6 +386,6 @@ The v28 Baseline framework demonstrates that **high performance and modularity a
 ---
 
 **Repository**: https://github.com/frasertajima/CIFAR-10
-**Branch**: `claude/resume-chat-session-01UtRwTcsfpdK8bBsrpadPZf`
+**Branch**: `v28_baseline`
 **Status**: 🎉 Validated with 4 diverse datasets
 **Last Updated**: 2025-11-17
