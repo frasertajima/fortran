@@ -102,3 +102,6 @@ See `v28_baseline/` for complete documentation including:
 **Repository**: https://github.com/frasertajima/CIFAR-10
 **Status**: ✅ Production-ready
 **Last Updated**: 2025-11-17
+
+---
+Inference testing shows data models are not synced. DONT USE until fixed! ****
