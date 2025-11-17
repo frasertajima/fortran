@@ -9,6 +9,11 @@ This directory contains PyTorch reference implementations that **exactly match**
 - Help users understand the CNN architecture
 - Enable framework comparisons
 
+## Actual results:
+
+<img width="884" height="880" alt="Screenshot From 2025-11-17 08-51-16" src="https://github.com/user-attachments/assets/5febb43d-9385-45c5-81db-8470a0c2bbe3" />
+
+
 ## Architecture
 
 All implementations use the **same CNN architecture** as v28:
