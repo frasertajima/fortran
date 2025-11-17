@@ -13,17 +13,17 @@ v28 Baseline follows three core principles:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Application Layer (Main Training Program)                      │
-│  - Epoch loop                                                    │
-│  - Batch iteration                                               │
-│  - Metrics tracking                                              │
-│  - Model checkpointing                                           │
+│  - Epoch loop                                                   │
+│  - Batch iteration                                              │
+│  - Metrics tracking                                             │
+│  - Model checkpointing                                          │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  Training Layer (cuDNN Operations)                               │
-│  - Forward pass (convolution, pooling, activation)               │
-│  - Backward pass (gradients)                                     │
-│  - Loss computation (softmax + cross-entropy)                    │
+│  Training Layer (cuDNN Operations)                              │
+│  - Forward pass (convolution, pooling, activation)              │
+│  - Backward pass (gradients)                                    │
+│  - Loss computation (softmax + cross-entropy)                   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────┬─────────────┬──────────────────────────┐
@@ -34,11 +34,11 @@ v28 Baseline follows three core principles:
 └──────────────────────┴─────────────┴──────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  CUDA Runtime Layer                                              │
-│  - cuDNN (convolutions, batch norm, pooling)                     │
-│  - cuBLAS (matrix operations)                                    │
-│  - cuRAND (random number generation)                             │
-│  - CUDA kernels (custom operations)                              │
+│  CUDA Runtime Layer                                             │
+│  - cuDNN (convolutions, batch norm, pooling)                    │
+│  - cuBLAS (matrix operations)                                   │
+│  - cuRAND (random number generation)                            │
+│  - CUDA kernels (custom operations)                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -204,30 +204,30 @@ end module dataset_config
 ┌─────────────────────────────────────────────────────────────┐
 │  Persistent Data (Loaded Once)                              │
 ├─────────────────────────────────────────────────────────────┤
-│  gpu_train_data      (50000, 3072)  = 600 MB  [CIFAR-10]   │
-│  gpu_train_labels    (50000)        = 200 KB               │
-│  gpu_test_data       (10000, 3072)  = 120 MB               │
-│  gpu_test_labels     (10000)        = 40 KB                │
-│  gpu_shuffle_indices (50000)        = 200 KB               │
+│  gpu_train_data      (50000, 3072)  = 600 MB  [CIFAR-10]    │
+│  gpu_train_labels    (50000)        = 200 KB                │
+│  gpu_test_data       (10000, 3072)  = 120 MB                │
+│  gpu_test_labels     (10000)        = 40 KB                 │
+│  gpu_shuffle_indices (50000)        = 200 KB                │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  Model Parameters                                            │
+│  Model Parameters                                           │
 ├─────────────────────────────────────────────────────────────┤
-│  Conv1 weights       (3,3,3,32)     = 3.5 KB               │
+│  Conv1 weights       (3,3,3,32)     = 3.5 KB                │
 │  Conv1 BN params     (32)           = 128 B                 │
-│  Conv2 weights       (3,3,32,64)    = 74 KB                │
+│  Conv2 weights       (3,3,32,64)    = 74 KB                 │
 │  Conv2 BN params     (64)           = 256 B                 │
-│  Conv3 weights       (3,3,64,128)   = 295 KB               │
+│  Conv3 weights       (3,3,64,128)   = 295 KB                │
 │  Conv3 BN params     (128)          = 512 B                 │
-│  FC1 weights         (2048,512)     = 4.2 MB               │
-│  FC2 weights         (512,256)      = 524 KB               │
-│  FC3 weights         (256,10)       = 10 KB                │
+│  FC1 weights         (2048,512)     = 4.2 MB                │
+│  FC2 weights         (512,256)      = 524 KB                │
+│  FC3 weights         (256,10)       = 10 KB                 │
 │  Total:              ~5.1 MB                                │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  Optimizer State (Adam)                                      │
+│  Optimizer State (Adam)                                     │
 ├─────────────────────────────────────────────────────────────┤
 │  First moments (m)   ~5.1 MB                                │
 │  Second moments (v)  ~5.1 MB                                │
@@ -235,9 +235,9 @@ end module dataset_config
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  Batch Workspace (Temporary)                                 │
+│  Batch Workspace (Temporary)                                │
 ├─────────────────────────────────────────────────────────────┤
-│  batch_data          (128, 3072)    = 1.6 MB               │
+│  batch_data          (128, 3072)    = 1.6 MB                │
 │  batch_labels        (128)          = 512 B                 │
 │  Activations         (varies)       = ~50 MB                │
 │  Gradients           (varies)       = ~50 MB                │
