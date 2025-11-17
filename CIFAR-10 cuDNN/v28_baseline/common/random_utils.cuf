@@ -1,0 +1,84 @@
+!================================================================
+! Random Utilities Module - v28 Baseline
+!================================================================
+! Provides cuRAND wrapper for weight initialization and dropout
+!
+! This module is shared across ALL datasets (CIFAR-10, CIFAR-100,
+! SVHN, Fashion-MNIST, etc.)
+!
+! Usage:
+!   1. call initialize_curand_wrapper(seed_value)
+!   2. call generate_random_array_normal_single(array, size, mean, stddev)
+!   3. call cleanup_curand_wrapper()
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-16
+!================================================================
+module curand_wrapper_module
+    use cudafor
+    use curand
+    implicit none
+
+    type(curandGenerator) :: global_generator
+    logical, save :: curand_initialized = .false.
+contains
+
+    !================================================================
+    ! Initialize cuRAND generator with optional seed
+    !================================================================
+    subroutine initialize_curand_wrapper(seed_value)
+        integer(8), intent(in), optional :: seed_value
+        integer :: stat
+        integer(8) :: actual_seed
+
+        if (curand_initialized) return
+
+        actual_seed = 42_8  ! Default seed
+        if (present(seed_value)) actual_seed = seed_value
+
+        stat = curandCreateGenerator(global_generator, CURAND_RNG_PSEUDO_DEFAULT)
+        if (stat /= CURAND_STATUS_SUCCESS) then
+            print *, "❌ Failed to create cuRAND generator:", stat
+            return
+        endif
+
+        stat = curandSetPseudoRandomGeneratorSeed(global_generator, actual_seed)
+        if (stat /= CURAND_STATUS_SUCCESS) then
+            print *, "❌ Failed to set cuRAND seed:", stat
+            return
+        endif
+
+        curand_initialized = .true.
+        print *, "✅ cuRAND initialized with seed:", actual_seed
+    end subroutine initialize_curand_wrapper
+
+    !================================================================
+    ! Generate normal distribution random numbers on GPU
+    !================================================================
+    subroutine generate_random_array_normal_single(output_array, array_size, mean, stddev)
+        real(4), device, intent(out) :: output_array(:)
+        integer, intent(in) :: array_size
+        real(4), intent(in) :: mean, stddev
+        integer :: stat
+
+        if (.not. curand_initialized) then
+            print *, "❌ cuRAND not initialized, call initialize_curand_wrapper() first"
+            return
+        endif
+
+        stat = curandGenerateNormal(global_generator, output_array, array_size, mean, stddev)
+        if (stat /= CURAND_STATUS_SUCCESS) then
+            print *, "❌ Failed to generate normal random numbers:", stat
+        endif
+    end subroutine generate_random_array_normal_single
+
+    !================================================================
+    ! Cleanup cuRAND resources
+    !================================================================
+    subroutine cleanup_curand_wrapper()
+        integer :: stat
+        if (.not. curand_initialized) return
+        stat = curandDestroyGenerator(global_generator)
+        curand_initialized = .false.
+    end subroutine cleanup_curand_wrapper
+end module curand_wrapper_module

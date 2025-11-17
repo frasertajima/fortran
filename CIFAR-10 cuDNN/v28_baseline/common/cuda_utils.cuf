@@ -1,0 +1,465 @@
+module cuda_batch_state
+    use cudafor
+    use cublas_v2
+    use iso_c_binding
+    implicit none
+
+    ! Debug control
+    private
+    logical, save, public :: debug_mode = .false.
+    integer, parameter :: debug_unit = 6  ! Use standard output
+
+    ! Constants and device properties
+    integer, save, public :: available_tensor_cores = 0
+    integer, save, public :: device_tensor_cores = 0
+    integer, parameter, public :: TCB_DIM = 16
+    integer, parameter :: MAX_STREAM_COUNT = 16
+
+    ! Memory pool management (NEW)
+    type :: memory_pool_t
+        real(c_double), device, allocatable :: double_buffer(:)
+        real(c_float), device, allocatable :: float_buffer(:)
+        integer(c_int) :: double_capacity = 0
+        integer(c_int) :: float_capacity = 0
+        integer(c_int) :: double_used = 0
+        integer(c_int) :: float_used = 0
+        logical :: initialized = .false.
+    end type
+
+    ! Enhanced resource unit with work memory (NEW)
+    type :: cuda_resource_unit
+        type(cublasHandle) :: handle
+        integer(kind=cuda_stream_kind) :: stream
+        type(memory_pool_t) :: work_memory
+        logical :: initialized = .false.
+        logical :: in_use = .false.
+    end type
+
+    type(cuda_resource_unit), allocatable :: resources(:)
+    logical, save :: resources_initialized = .false.
+
+    ! Scheduler flags - used to optimize polling behavior
+    integer, save :: scheduling_mode = 0  ! 0=default, 1=blocking, 2=yield
+    logical, save :: scheduling_set = .false.
+
+    ! Public interface
+    public :: cuda_resource_unit
+    public :: resources
+    public :: cuda_error_check
+    public :: debug_print
+    public :: initialize_cuda_resources
+    public :: finalize_cuda_resources
+    public :: get_device_capabilities
+    public :: get_cuda_resources
+
+    ! (new)
+    public :: allocate_persistent_memory
+    public :: set_scheduling_mode
+    public :: acquire_resource
+    public :: release_resource
+
+contains
+    ! Set scheduling mode to reduce polling overhead (NEW)
+    subroutine set_scheduling_mode(mode) bind(c, name='set_scheduling_mode')
+        integer, value :: mode
+        integer :: istat
+        character(len=256) :: msg
+
+        if (scheduling_set) then
+            call debug_print("Scheduling mode already set, cannot be changed")
+            return
+        endif
+
+        scheduling_mode = mode
+
+        select case(mode)
+            case(0)  ! Default - spin polling
+                call debug_print("Using default scheduling mode (spin polling)")
+                istat = cudaSetDeviceFlags(cudaDeviceScheduleSpin)
+            case(1)  ! Blocking synchronization
+                call debug_print("Using blocking synchronization mode to reduce CPU usage")
+                istat = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync)
+            case(2)  ! Yield while waiting
+                call debug_print("Using yield scheduling mode")
+                istat = cudaSetDeviceFlags(cudaDeviceScheduleYield)
+            case default
+                write(msg, '("Invalid scheduling mode: ", I0)') mode
+                call debug_print(trim(msg))
+                return
+        end select
+
+        if (istat /= cudaSuccess) then
+            call debug_print("Failed to set device scheduling flags")
+            write(msg, '("CUDA error code: ", I0)') istat
+            call debug_print(trim(msg))
+        else
+            scheduling_set = .true.
+        endif
+    end subroutine
+
+    ! Initialize persistent memory for each resource (NEW)
+    subroutine allocate_persistent_memory(resource_id, double_size, float_size)
+        integer, intent(in) :: resource_id
+        integer, intent(in) :: double_size, float_size
+        integer :: istat
+        character(len=256) :: msg
+
+        if (.not. resources_initialized) then
+            call debug_print("Resources not initialized. Call initialize_cuda_resources first")
+            return
+        endif
+
+        if (resource_id < 1 .or. resource_id > available_tensor_cores) then
+            write(msg, '("Invalid resource ID: ", I0)') resource_id
+            call debug_print(trim(msg))
+            return
+        endif
+
+        ! Allocate double buffer if needed
+        if (double_size > 0) then
+            if (resources(resource_id)%work_memory%double_capacity < double_size) then
+                ! Free existing buffer if too small
+                if (allocated(resources(resource_id)%work_memory%double_buffer)) then
+                    deallocate(resources(resource_id)%work_memory%double_buffer)
+                endif
+
+                ! Allocate new buffer
+                allocate(resources(resource_id)%work_memory%double_buffer(double_size), stat=istat)
+                if (istat /= 0) then
+                    call debug_print("Failed to allocate double buffer")
+                    return
+                endif
+
+                resources(resource_id)%work_memory%double_capacity = double_size
+                resources(resource_id)%work_memory%double_used = 0
+
+                ! Initialize to zero for safety
+                resources(resource_id)%work_memory%double_buffer = 0.0d0
+            endif
+        endif
+
+        ! Allocate float buffer if needed
+        if (float_size > 0) then
+            if (resources(resource_id)%work_memory%float_capacity < float_size) then
+                ! Free existing buffer if too small
+                if (allocated(resources(resource_id)%work_memory%float_buffer)) then
+                    deallocate(resources(resource_id)%work_memory%float_buffer)
+                endif
+
+                ! Allocate new buffer
+                allocate(resources(resource_id)%work_memory%float_buffer(float_size), stat=istat)
+                if (istat /= 0) then
+                    call debug_print("Failed to allocate float buffer")
+                    return
+                endif
+
+                resources(resource_id)%work_memory%float_capacity = float_size
+                resources(resource_id)%work_memory%float_used = 0
+
+                ! Initialize to zero for safety
+                resources(resource_id)%work_memory%float_buffer = 0.0
+            endif
+        endif
+
+        resources(resource_id)%work_memory%initialized = .true.
+
+        write(msg, '("Persistent memory allocated for resource ", I0, ": ", I0, " doubles, ", I0, " floats")') &
+              resource_id, double_size, float_size
+        call debug_print(trim(msg))
+    end subroutine
+
+    ! Resource management - acquire a CUDA resource (NEW)
+    function acquire_resource() result(resource_id)
+        integer :: resource_id
+        integer :: i
+
+        ! Default to no resource
+        resource_id = -1
+
+        if (.not. resources_initialized) then
+            call debug_print("Resources not initialized. Call initialize_cuda_resources first")
+            return
+        endif
+
+        ! Find first available resource
+        do i = 1, available_tensor_cores
+            if (.not. resources(i)%in_use) then
+                resources(i)%in_use = .true.
+                resource_id = i
+                return
+            endif
+        end do
+
+        call debug_print("No resources available to acquire!")
+    end function
+
+    ! Resource management - release a CUDA resource (NEW)
+    subroutine release_resource(resource_id)
+        integer, intent(in) :: resource_id
+        character(len=256) :: msg
+
+        if (.not. resources_initialized) then
+            call debug_print("Resources not initialized. Call initialize_cuda_resources first")
+            return
+        endif
+
+        if (resource_id < 1 .or. resource_id > available_tensor_cores) then
+            write(msg, '("Invalid resource ID: ", I0)') resource_id
+            call debug_print(trim(msg))
+            return
+        endif
+
+        resources(resource_id)%in_use = .false.
+    end subroutine
+    ! -----------------------------------------------------------------------------
+
+    ! Enhanced debug print with immediate flush
+    subroutine debug_print(message)
+        character(len=*), intent(in) :: message
+
+        if (debug_mode) then
+            write(debug_unit, '(A)') trim(message)
+            flush(debug_unit)  ! Force immediate output
+        endif
+    end subroutine
+
+    ! Error checking with detailed output
+    subroutine cuda_error_check(error_code, context)
+        integer, intent(in) :: error_code
+        character(len=*), intent(in) :: context
+        character(len=256) :: error_string
+
+        if (error_code /= cudaSuccess) then
+            error_string = cudaGetErrorString(error_code)
+            write(debug_unit, '("CUDA Error in ", A)') trim(context)
+            write(debug_unit, '("Error code: ", I0)') error_code
+            write(debug_unit, '("Error message: ", A)') trim(error_string)
+            flush(debug_unit)
+            call exit(error_code)
+        endif
+    end subroutine
+
+    ! Get device capabilities with enhanced error reporting
+    subroutine get_device_capabilities() bind(c, name='py_get_device_capabilities')
+        type(cudaDeviceProp) :: prop
+        integer :: device_id, device_count, istat
+        character(len=256) :: msg
+
+        call debug_print("Getting CUDA device capabilities...")
+
+        ! Get device count
+        istat = cudaGetDeviceCount(device_count)
+        if (istat /= cudaSuccess) then
+            call debug_print("Failed to get CUDA device count")
+            return
+        endif
+
+        write(msg, '("Found ", I0, " CUDA devices")') device_count
+        call debug_print(trim(msg))
+
+        if (device_count < 1) then
+            call debug_print("No CUDA devices found!")
+            return
+        endif
+
+        ! Get current device
+        istat = cudaGetDevice(device_id)
+        if (istat /= cudaSuccess) then
+            call debug_print("Failed to get current CUDA device")
+            return
+        endif
+
+        ! Get properties
+        istat = cudaGetDeviceProperties(prop, device_id)
+        if (istat /= cudaSuccess) then
+            call debug_print("Failed to get device properties")
+            return
+        endif
+
+        ! Set tensor core count based on architecture
+        select case(prop%major)
+            case(8)  ! Ampere
+                if (prop%minor == 0) then
+                    device_tensor_cores = 432  ! A100
+                else
+                    device_tensor_cores = 72   ! Other Ampere
+                endif
+            case(9)  ! Ada Lovelace
+                device_tensor_cores = 96  ! RTX 4060
+            case default
+                device_tensor_cores = 32  ! Conservative default
+        end select
+
+        write(msg, '("Device ", I0, " (", A, ")")') device_id, trim(prop%name)
+        call debug_print(trim(msg))
+        write(msg, '("Compute capability: ", I0, ".", I0)') prop%major, prop%minor
+        call debug_print(trim(msg))
+        write(msg, '("Available tensor cores: ", I0)') device_tensor_cores
+        call debug_print(trim(msg))
+    end subroutine
+
+    ! Resource initialization with detailed status reporting
+    subroutine initialize_cuda_resources() bind(c, name='py_initialize_cuda_resources')
+        integer :: i, stat
+        character(len=256) :: msg
+
+        if (resources_initialized) then
+            call debug_print("Resources already initialized")
+            return
+        endif
+
+        if (device_tensor_cores <= 0) then
+            call debug_print("Getting device capabilities first...")
+            call get_device_capabilities()
+        endif
+
+        if (available_tensor_cores <= 0) then
+            available_tensor_cores = min(device_tensor_cores, MAX_STREAM_COUNT)
+        endif
+
+        ! Set blocking synchronization mode by default if not already set
+        if (.not. scheduling_set) then
+            call set_scheduling_mode(1)  ! Use blocking sync to reduce CPU overhead
+        endif
+
+        write(msg, '("Initializing resources for ", I0, " tensor cores")') available_tensor_cores
+        call debug_print(trim(msg))
+
+        if (allocated(resources)) deallocate(resources)
+        allocate(resources(available_tensor_cores), stat=stat)
+        if (stat /= 0) then
+            call debug_print("Failed to allocate resource array")
+            return
+        endif
+
+        do i = 1, available_tensor_cores
+            ! Create stream with non-blocking behavior
+            stat = cudaStreamCreateWithFlags(resources(i)%stream, cudaStreamNonBlocking)
+            if (stat /= cudaSuccess) then
+                write(msg, '("Failed to create stream ", I0)') i
+                call debug_print(trim(msg))
+                call cleanup_resources(i-1)
+                return
+            endif
+
+            ! Create handle
+            stat = cublasCreate(resources(i)%handle)
+            if (stat /= CUBLAS_STATUS_SUCCESS) then
+                write(msg, '("Failed to create cuBLAS handle ", I0)') i
+                call debug_print(trim(msg))
+                stat = cudaStreamDestroy(resources(i)%stream)
+                call cleanup_resources(i-1)
+                return
+            endif
+
+            ! Set handle properties
+            stat = cublasSetStream(resources(i)%handle, resources(i)%stream)
+            if (stat /= CUBLAS_STATUS_SUCCESS) then
+                write(msg, '("Failed to set stream for handle ", I0)') i
+                call debug_print(trim(msg))
+                stat = cublasDestroy(resources(i)%handle)
+                stat = cudaStreamDestroy(resources(i)%stream)
+                call cleanup_resources(i-1)
+                return
+            endif
+
+            ! Initialize math mode to use tensor cores
+            stat = cublasSetMathMode(resources(i)%handle, CUBLAS_TENSOR_OP_MATH)
+
+            ! Initialize memory management
+            resources(i)%work_memory%initialized = .false.
+            resources(i)%work_memory%double_capacity = 0
+            resources(i)%work_memory%float_capacity = 0
+            resources(i)%work_memory%double_used = 0
+            resources(i)%work_memory%float_used = 0
+
+            resources(i)%initialized = .true.
+            resources(i)%in_use = .false.
+        end do
+
+        resources_initialized = .true.
+        call debug_print("Resource initialization complete")
+
+        ! Lighter synchronization - avoid device-wide sync here
+        stat = cudaStreamSynchronize(resources(1)%stream)
+        if (stat /= cudaSuccess) then
+            call debug_print("Warning: Final initialization sync failed")
+        endif
+    end subroutine
+
+    ! global accessor function that can be called from anywhere
+    subroutine get_cuda_resources(status)
+        logical, intent(out) :: status
+
+        ! Initialize if not already done
+        if (.not. resources_initialized) then
+            call initialize_cuda_resources()
+        endif
+
+        status = resources_initialized
+    end subroutine get_cuda_resources
+
+    ! Resource cleanup with error handling (UPDATED)
+    subroutine cleanup_resources(n)
+        integer, intent(in) :: n
+        integer :: i, stat
+        character(len=256) :: msg
+
+        write(msg, '("Cleaning up ", I0, " resources")') n
+        call debug_print(trim(msg))
+
+        do i = 1, n
+            if (resources(i)%initialized) then
+                ! Free memory pools first
+                if (resources(i)%work_memory%initialized) then
+                    if (allocated(resources(i)%work_memory%double_buffer)) then
+                        deallocate(resources(i)%work_memory%double_buffer)
+                    endif
+
+                    if (allocated(resources(i)%work_memory%float_buffer)) then
+                        deallocate(resources(i)%work_memory%float_buffer)
+                    endif
+
+                    resources(i)%work_memory%initialized = .false.
+                endif
+
+                stat = cublasDestroy(resources(i)%handle)
+                if (stat /= CUBLAS_STATUS_SUCCESS) then
+                    write(msg, '("Warning: Failed to destroy handle ", I0)') i
+                    call debug_print(trim(msg))
+                endif
+
+                stat = cudaStreamDestroy(resources(i)%stream)
+                if (stat /= cudaSuccess) then
+                    write(msg, '("Warning: Failed to destroy stream ", I0)') i
+                    call debug_print(trim(msg))
+                endif
+
+                resources(i)%initialized = .false.
+                resources(i)%in_use = .false.
+            endif
+        end do
+    end subroutine
+
+    ! Final cleanup
+    subroutine finalize_cuda_resources() bind(c)
+        if (.not. resources_initialized) then
+            call debug_print("No resources to finalize")
+            return
+        endif
+
+        call debug_print("Starting resource finalization")
+        call cleanup_resources(available_tensor_cores)
+
+        if (allocated(resources)) then
+            deallocate(resources)
+            call debug_print("Resource array deallocated")
+        endif
+
+        resources_initialized = .false.
+        available_tensor_cores = 0
+        call debug_print("Resource finalization complete")
+    end subroutine
+
+end module cuda_batch_state
+! cuda_batch_state3.cuf with new memory management
