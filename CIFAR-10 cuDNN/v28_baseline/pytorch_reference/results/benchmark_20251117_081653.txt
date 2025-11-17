@@ -1,0 +1,434 @@
+Starting benchmarks at Mon 17 Nov 08:16:53 PST 2025
+
+======================================================================
+CIFAR-10 PyTorch Reference Implementation (v28 Architecture)
+======================================================================
+
+Device: cuda
+GPU: NVIDIA GeForce RTX 4060
+
+Loading CIFAR-10 dataset...
+Training samples: 50000
+Test samples: 10000
+
+Total parameters: 1,278,218
+Trainable parameters: 1,278,218
+
+======================================================================
+Starting Training (10 epochs, batch size 128)
+======================================================================
+
+Epoch  1/15
+  Train Loss: 1.1681  Train Acc:  58.33%
+  Test Loss:  0.9986  Test Acc:   65.35%
+  Time: 9.7s
+
+Epoch  2/15
+  Train Loss: 0.8611  Train Acc:  69.88%
+  Test Loss:  0.8471  Test Acc:   70.37%
+  Time: 9.4s
+
+Epoch  3/15
+  Train Loss: 0.7417  Train Acc:  73.95%
+  Test Loss:  0.8486  Test Acc:   70.34%
+  Time: 9.7s
+
+Epoch  4/15
+  Train Loss: 0.6454  Train Acc:  77.58%
+  Test Loss:  0.8471  Test Acc:   71.37%
+  Time: 9.7s
+
+Epoch  5/15
+  Train Loss: 0.5631  Train Acc:  80.25%
+  Test Loss:  0.7314  Test Acc:   75.91%
+  Time: 9.9s
+
+Epoch  6/15
+  Train Loss: 0.4931  Train Acc:  82.59%
+  Test Loss:  0.8138  Test Acc:   73.63%
+  Time: 9.7s
+
+Epoch  7/15
+  Train Loss: 0.4297  Train Acc:  84.81%
+  Test Loss:  0.8719  Test Acc:   71.94%
+  Time: 9.8s
+
+Epoch  8/15
+  Train Loss: 0.3698  Train Acc:  86.90%
+  Test Loss:  0.9110  Test Acc:   72.52%
+  Time: 9.9s
+
+Epoch  9/15
+  Train Loss: 0.3295  Train Acc:  88.42%
+  Test Loss:  0.8452  Test Acc:   75.28%
+  Time: 9.7s
+
+Epoch 10/15
+  Train Loss: 0.2849  Train Acc:  89.93%
+  Test Loss:  0.8626  Test Acc:   75.57%
+  Time: 9.8s
+
+Epoch 11/15
+  Train Loss: 0.2500  Train Acc:  90.98%
+  Test Loss:  0.9691  Test Acc:   74.53%
+  Time: 9.9s
+
+Epoch 12/15
+  Train Loss: 0.2216  Train Acc:  92.14%
+  Test Loss:  0.9452  Test Acc:   74.79%
+  Time: 9.8s
+
+Epoch 13/15
+  Train Loss: 0.1951  Train Acc:  93.06%
+  Test Loss:  1.0839  Test Acc:   72.79%
+  Time: 9.9s
+
+Epoch 14/15
+  Train Loss: 0.1775  Train Acc:  93.81%
+  Test Loss:  1.0738  Test Acc:   73.61%
+  Time: 9.9s
+
+Epoch 15/15
+  Train Loss: 0.1612  Train Acc:  94.18%
+  Test Loss:  1.0640  Test Acc:   74.38%
+  Time: 9.9s
+
+======================================================================
+🎉 TRAINING COMPLETED!
+======================================================================
+🏆 Best Test Accuracy:  75.91%
+📊 Final Train Accuracy: 94.18%
+📊 Final Test Accuracy:  74.38%
+⏱️  Total Time:    146.7s
+⏱️  Avg Time/Epoch: 9.8s
+======================================================================
+
+📈 Comparison to v28 CUDA Fortran:
+   PyTorch:       ~147s (this run)
+   v28 Fortran:   ~31s (reported)
+   Speedup:       4.7× faster (Fortran)
+======================================================================
+======================================================================
+Fashion-MNIST PyTorch Reference Implementation (v28 Architecture)
+======================================================================
+
+Device: cuda
+GPU: NVIDIA GeForce RTX 4060
+
+Loading Fashion-MNIST dataset...
+Training samples: 60000
+Test samples: 10000
+
+Total parameters: 818,890
+Trainable parameters: 818,890
+
+======================================================================
+Starting Training (15 epochs, batch size 128)
+======================================================================
+
+Epoch  1/15
+  Train Loss: 0.3696  Train Acc:  86.75%
+  Test Loss:  0.3067  Test Acc:   88.72%
+  Time: 6.1s
+
+Epoch  2/15
+  Train Loss: 0.2536  Train Acc:  90.85%
+  Test Loss:  0.2621  Test Acc:   90.47%
+  Time: 5.7s
+
+Epoch  3/15
+  Train Loss: 0.2162  Train Acc:  92.10%
+  Test Loss:  0.2658  Test Acc:   90.57%
+  Time: 5.8s
+
+Epoch  4/15
+  Train Loss: 0.1878  Train Acc:  93.10%
+  Test Loss:  0.2567  Test Acc:   91.00%
+  Time: 5.8s
+
+Epoch  5/15
+  Train Loss: 0.1637  Train Acc:  93.97%
+  Test Loss:  0.2449  Test Acc:   91.80%
+  Time: 5.8s
+
+Epoch  6/15
+  Train Loss: 0.1419  Train Acc:  94.72%
+  Test Loss:  0.2568  Test Acc:   91.76%
+  Time: 5.8s
+
+Epoch  7/15
+  Train Loss: 0.1257  Train Acc:  95.42%
+  Test Loss:  0.2701  Test Acc:   90.45%
+  Time: 5.8s
+
+Epoch  8/15
+  Train Loss: 0.1097  Train Acc:  95.92%
+  Test Loss:  0.3101  Test Acc:   90.63%
+  Time: 5.8s
+
+Epoch  9/15
+  Train Loss: 0.0975  Train Acc:  96.39%
+  Test Loss:  0.2858  Test Acc:   91.18%
+  Time: 5.8s
+
+Epoch 10/15
+  Train Loss: 0.0857  Train Acc:  96.89%
+  Test Loss:  0.2973  Test Acc:   91.31%
+  Time: 5.8s
+
+Epoch 11/15
+  Train Loss: 0.0760  Train Acc:  97.27%
+  Test Loss:  0.3243  Test Acc:   90.76%
+  Time: 5.8s
+
+Epoch 12/15
+  Train Loss: 0.0677  Train Acc:  97.50%
+  Test Loss:  0.3162  Test Acc:   91.66%
+  Time: 5.8s
+
+Epoch 13/15
+  Train Loss: 0.0615  Train Acc:  97.75%
+  Test Loss:  0.3194  Test Acc:   91.64%
+  Time: 5.7s
+
+Epoch 14/15
+  Train Loss: 0.0578  Train Acc:  97.84%
+  Test Loss:  0.3465  Test Acc:   91.13%
+  Time: 5.8s
+
+Epoch 15/15
+  Train Loss: 0.0505  Train Acc:  98.05%
+  Test Loss:  0.3432  Test Acc:   91.56%
+  Time: 5.8s
+
+======================================================================
+🎉 TRAINING COMPLETED!
+======================================================================
+🏆 Best Test Accuracy:  91.80%
+📊 Final Train Accuracy: 98.05%
+📊 Final Test Accuracy:  91.56%
+⏱️  Total Time:    87.0s
+⏱️  Avg Time/Epoch: 5.8s
+======================================================================
+
+📈 Comparison to v28 CUDA Fortran:
+   PyTorch:       ~87s (this run)
+   v28 Fortran:   ~28s (reported)
+   Speedup:       3.1× faster (Fortran)
+======================================================================
+======================================================================
+CIFAR-100 PyTorch Reference Implementation (v28 Architecture)
+======================================================================
+
+Device: cuda
+GPU: NVIDIA GeForce RTX 4060
+
+Loading CIFAR-100 dataset...
+Training samples: 50000
+Test samples: 10000
+
+Total parameters: 1,301,348
+Trainable parameters: 1,301,348
+
+======================================================================
+Starting Training (15 epochs, batch size 128)
+======================================================================
+
+Epoch  1/15
+  Train Loss: 3.2414  Train Acc:  21.90%
+  Test Loss:  2.7741  Test Acc:   30.35%
+  Time: 9.9s
+
+Epoch  2/15
+  Train Loss: 2.5207  Train Acc:  35.42%
+  Test Loss:  2.3622  Test Acc:   38.72%
+  Time: 9.5s
+
+Epoch  3/15
+  Train Loss: 2.2256  Train Acc:  41.61%
+  Test Loss:  2.2225  Test Acc:   42.53%
+  Time: 9.5s
+
+Epoch  4/15
+  Train Loss: 2.0219  Train Acc:  46.02%
+  Test Loss:  2.0870  Test Acc:   44.90%
+  Time: 9.5s
+
+Epoch  5/15
+  Train Loss: 1.8494  Train Acc:  50.00%
+  Test Loss:  2.1148  Test Acc:   45.03%
+  Time: 9.6s
+
+Epoch  6/15
+  Train Loss: 1.6913  Train Acc:  53.25%
+  Test Loss:  2.0906  Test Acc:   45.62%
+  Time: 9.6s
+
+Epoch  7/15
+  Train Loss: 1.5474  Train Acc:  56.91%
+  Test Loss:  2.1360  Test Acc:   45.47%
+  Time: 9.6s
+
+Epoch  8/15
+  Train Loss: 1.4060  Train Acc:  59.94%
+  Test Loss:  2.2805  Test Acc:   43.55%
+  Time: 9.6s
+
+Epoch  9/15
+  Train Loss: 1.2830  Train Acc:  62.97%
+  Test Loss:  2.2111  Test Acc:   45.50%
+  Time: 9.6s
+
+Epoch 10/15
+  Train Loss: 1.1617  Train Acc:  65.98%
+  Test Loss:  2.2341  Test Acc:   46.55%
+  Time: 9.5s
+
+Epoch 11/15
+  Train Loss: 1.0563  Train Acc:  68.58%
+  Test Loss:  2.2123  Test Acc:   46.18%
+  Time: 9.5s
+
+Epoch 12/15
+  Train Loss: 0.9572  Train Acc:  71.50%
+  Test Loss:  2.3011  Test Acc:   46.30%
+  Time: 9.6s
+
+Epoch 13/15
+  Train Loss: 0.8769  Train Acc:  73.21%
+  Test Loss:  2.3335  Test Acc:   46.75%
+  Time: 9.6s
+
+Epoch 14/15
+  Train Loss: 0.8086  Train Acc:  75.01%
+  Test Loss:  2.4773  Test Acc:   44.77%
+  Time: 9.6s
+
+Epoch 15/15
+  Train Loss: 0.7385  Train Acc:  77.12%
+  Test Loss:  2.5506  Test Acc:   45.30%
+  Time: 9.6s
+
+======================================================================
+🎉 TRAINING COMPLETED!
+======================================================================
+🏆 Best Test Accuracy:  46.75%
+📊 Final Train Accuracy: 77.12%
+📊 Final Test Accuracy:  45.30%
+⏱️  Total Time:    143.9s
+⏱️  Avg Time/Epoch: 9.6s
+======================================================================
+
+📈 Comparison to v28 CUDA Fortran:
+   PyTorch:       ~144s (this run)
+   v28 Fortran:   ~35s (reported)
+   Speedup:       4.1× faster (Fortran)
+======================================================================
+======================================================================
+SVHN PyTorch Reference Implementation (v28 Architecture)
+======================================================================
+
+Device: cuda
+GPU: NVIDIA GeForce RTX 4060
+
+Loading SVHN dataset...
+Training samples: 73257
+Test samples: 26032
+
+Total parameters: 1,278,218
+Trainable parameters: 1,278,218
+
+======================================================================
+Starting Training (15 epochs, batch size 128)
+======================================================================
+
+Epoch  1/15
+  Train Loss: 0.6328  Train Acc:  80.47%
+  Test Loss:  0.4766  Test Acc:   86.01%
+  Time: 12.1s
+
+Epoch  2/15
+  Train Loss: 0.4013  Train Acc:  88.00%
+  Test Loss:  0.3978  Test Acc:   88.51%
+  Time: 11.7s
+
+Epoch  3/15
+  Train Loss: 0.3494  Train Acc:  89.67%
+  Test Loss:  0.3886  Test Acc:   88.56%
+  Time: 11.7s
+
+Epoch  4/15
+  Train Loss: 0.3088  Train Acc:  90.83%
+  Test Loss:  0.3706  Test Acc:   89.10%
+  Time: 11.8s
+
+Epoch  5/15
+  Train Loss: 0.2790  Train Acc:  91.67%
+  Test Loss:  0.3662  Test Acc:   89.55%
+  Time: 11.7s
+
+Epoch  6/15
+  Train Loss: 0.2559  Train Acc:  92.30%
+  Test Loss:  0.3713  Test Acc:   89.43%
+  Time: 11.8s
+
+Epoch  7/15
+  Train Loss: 0.2325  Train Acc:  93.05%
+  Test Loss:  0.3769  Test Acc:   89.51%
+  Time: 11.7s
+
+Epoch  8/15
+  Train Loss: 0.2138  Train Acc:  93.49%
+  Test Loss:  0.3554  Test Acc:   90.09%
+  Time: 11.7s
+
+Epoch  9/15
+  Train Loss: 0.1964  Train Acc:  93.97%
+  Test Loss:  0.3812  Test Acc:   89.48%
+  Time: 11.8s
+
+Epoch 10/15
+  Train Loss: 0.1814  Train Acc:  94.37%
+  Test Loss:  0.3939  Test Acc:   89.39%
+  Time: 11.9s
+
+Epoch 11/15
+  Train Loss: 0.1651  Train Acc:  94.81%
+  Test Loss:  0.3829  Test Acc:   89.87%
+  Time: 11.7s
+
+Epoch 12/15
+  Train Loss: 0.1518  Train Acc:  95.23%
+  Test Loss:  0.3738  Test Acc:   90.29%
+  Time: 11.8s
+
+Epoch 13/15
+  Train Loss: 0.1380  Train Acc:  95.60%
+  Test Loss:  0.4038  Test Acc:   89.95%
+  Time: 11.8s
+
+Epoch 14/15
+  Train Loss: 0.1296  Train Acc:  95.87%
+  Test Loss:  0.4046  Test Acc:   89.88%
+  Time: 11.7s
+
+Epoch 15/15
+  Train Loss: 0.1172  Train Acc:  96.23%
+  Test Loss:  0.4443  Test Acc:   89.24%
+  Time: 11.8s
+
+======================================================================
+🎉 TRAINING COMPLETED!
+======================================================================
+🏆 Best Test Accuracy:  90.29%
+📊 Final Train Accuracy: 96.23%
+📊 Final Test Accuracy:  89.24%
+⏱️  Total Time:    176.4s
+⏱️  Avg Time/Epoch: 11.8s
+======================================================================
+
+📈 Comparison to v28 CUDA Fortran:
+   PyTorch:       ~176s (this run)
+   v28 Fortran:   ~40s (reported)
+   Speedup:       4.4× faster (Fortran)
+======================================================================
