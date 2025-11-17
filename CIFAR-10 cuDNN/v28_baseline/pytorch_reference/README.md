@@ -93,7 +93,7 @@ python svhn_reference.py
 | CIFAR-100 | ~65s | ~35s | 1.9× | 46-50% |
 | SVHN | ~75s | ~40s | 1.9× | 92-93% |
 
-**Hardware**: NVIDIA V100 GPU
+**Hardware**: NVIDIA RTX4060 GPU with 8GB
 
 ## Requirements
 
