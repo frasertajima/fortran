@@ -104,4 +104,4 @@ See `v28_baseline/` for complete documentation including:
 **Last Updated**: 2025-11-17
 
 ---
-Inference testing shows data models are not synced. DONT USE until fixed! ****
+Inference testing shows data models are not synced. Actually, it may just be a bug in the export of the model (to be updated soon) ****
