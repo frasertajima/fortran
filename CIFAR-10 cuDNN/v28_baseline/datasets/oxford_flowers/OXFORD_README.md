@@ -217,6 +217,3 @@ https://github.com/[your-repo]/CIFAR-10
 - **Oxford Flowers 102**: Dataset
 - **MobileNetV2**: Feature extractor
 
----
-
-**The future of ML research is fast, systematic, and iterative. This is how we get there.** 🚀
