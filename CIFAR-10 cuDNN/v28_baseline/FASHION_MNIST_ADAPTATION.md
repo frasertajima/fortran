@@ -1,8 +1,11 @@
 # Fashion-MNIST Adaptation - Summary
 
 **Repository**: frasertajima/CIFAR-10
-**Branch**: `claude/switch-pytorch-parity-repo-01J2Q6MqaiLCyUR2jX79sxce`
+
+**Branch**: `v28_baseline'
+
 **Date**: 2025-11-17
+
 **Status**: ✅ **COMPLETE AND WORKING**
 
 ## Overview
@@ -142,7 +145,7 @@ The Fashion-MNIST adaptation demonstrates that the v28 baseline framework achiev
 ---
 
 **Repository**: https://github.com/frasertajima/CIFAR-10
-**Branch**: `claude/switch-pytorch-parity-repo-01J2Q6MqaiLCyUR2jX79sxce`
+**Branch**: `v28_baseline`
 **Documentation**: `v28_baseline/datasets/fashion_mnist/README_FASHION_MNIST.md`
 **Status**: 🎉 Ready for training and testing
 
