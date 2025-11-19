@@ -14,7 +14,7 @@ This repository contains the **v28 Baseline** - a production-ready, modular CUDA
 
 ### Key Features
 
-- ✅ **2× faster than PyTorch** (31s vs 61s on CIFAR-10)
+- ✅ **4× faster than PyTorch** (31s vs 146s on CIFAR-10)
 - ✅ **Fully modular** - add new datasets in <2 hours
 - ✅ **Validated on 4 datasets** - CIFAR-10, CIFAR-100, SVHN, Fashion-MNIST
 - ✅ **Comprehensive documentation** - design, architecture, and adaptation guides
