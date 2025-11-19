@@ -6,4 +6,6 @@ CIFAR-10 using cuDNN instrinics matching PyTorch in accuracy and execution speed
 cuDNN functions that were attempted
 
 Update: 
-Use the 2 line version 28 workflow to go from zero to training. Now optimised for 2x PyTorch speed and modular design.
+Use the 2 line version 28 workflow to go from zero to training. Now optimised for 4x PyTorch speed and modular design. ![`v28baseline_plus_export`](https://github.com/frasertajima/fortran/tree/main/CIFAR-10%20cuDNN/v28_baseline_plus_export) enables further inference and testing using Jupyter notebooks and python.
+
+<img width="1325" height="973" alt="Screenshot From 2025-11-19 13-19-33" src="https://github.com/user-attachments/assets/01b9a115-a3e7-4441-b0a3-b0b30de1b318" />
