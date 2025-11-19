@@ -1,0 +1,216 @@
+! Debug Inference Program - Load trained model and export layer activations
+! This is a standalone program for debugging - does not modify training code
+program debug_inference
+    use cudafor
+    use model_export
+    implicit none
+    
+    ! Model parameters
+    integer, parameter :: INPUT_HEIGHT = 32
+    integer, parameter :: INPUT_WIDTH = 32
+    integer, parameter :: INPUT_CHANNELS = 3
+    integer, parameter :: CONV1_FILTERS = 32
+    integer, parameter :: CONV2_FILTERS = 64
+    integer, parameter :: CONV3_FILTERS = 128
+    integer, parameter :: NUM_CLASSES = 10
+    integer, parameter :: KERNEL_SIZE = 3
+    integer, parameter :: PADDING = 1
+    
+    ! Test data
+    real(4), allocatable :: test_images(:,:)
+    integer, allocatable :: test_labels(:)
+    
+    ! Device arrays for single image inference
+    real(4), device, allocatable :: d_input(:,:,:,:)      ! (W,H,C,1)
+    real(4), device, allocatable :: conv1_out(:,:,:,:)
+    real(4), device, allocatable :: bn1_out(:,:,:,:)
+    real(4), device, allocatable :: pool1_out(:,:,:,:)
+    real(4), device, allocatable :: conv2_out(:,:,:,:)
+    real(4), device, allocatable :: bn2_out(:,:,:,:)
+    real(4), device, allocatable :: pool2_out(:,:,:,:)
+    real(4), device, allocatable :: conv3_out(:,:,:,:)
+    
+    ! Model weights (device)
+    real(4), device, allocatable :: conv1_w(:,:,:,:), conv1_b(:)
+    real(4), device, allocatable :: conv2_w(:,:,:,:), conv2_b(:)
+    real(4), device, allocatable :: conv3_w(:,:,:,:), conv3_b(:)
+    real(4), device, allocatable :: bn1_scale(:), bn1_bias(:), bn1_mean(:), bn1_var(:)
+    real(4), device, allocatable :: bn2_scale(:), bn2_bias(:), bn2_mean(:), bn2_var(:)
+    real(4), device, allocatable :: bn3_scale(:), bn3_bias(:), bn3_mean(:), bn3_var(:)
+    
+    character(len=256) :: model_dir, export_dir
+    integer :: i
+    
+    print *, "======================================================================"
+    print *, "🔍 DEBUG INFERENCE: Layer-by-Layer Activation Export"
+    print *, "======================================================================"
+    print *, ""
+    
+    model_dir = "datasets/cifar10/saved_models/cifar10/"
+    export_dir = trim(model_dir)
+    
+    ! Load test data
+    print *, "Loading test data..."
+    allocate(test_images(10000, 3072))
+    allocate(test_labels(10000))
+    
+    open(unit=10, file='datasets/cifar10/cifar10_data/images_test.bin', &
+         form='unformatted', access='stream', status='old')
+    read(10) test_images
+    close(10)
+    
+    open(unit=10, file='datasets/cifar10/cifar10_data/labels_test.bin', &
+         form='unformatted', access='stream', status='old')
+    read(10) test_labels
+    close(10)
+    
+    print *, "✓ Test data loaded"
+    print *, "  First image label:", test_labels(1)
+    print *, ""
+    
+    ! Load model weights
+    print *, "Loading model weights..."
+    call load_model_weights(model_dir)
+    print *, "✓ Model weights loaded"
+    print *, ""
+    
+    ! Allocate activation arrays
+    print *, "Allocating activation arrays..."
+    allocate(d_input(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, 1))
+    allocate(conv1_out(INPUT_WIDTH, INPUT_HEIGHT, CONV1_FILTERS, 1))
+    allocate(bn1_out(INPUT_WIDTH, INPUT_HEIGHT, CONV1_FILTERS, 1))
+    allocate(pool1_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV1_FILTERS, 1))
+    allocate(conv2_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV2_FILTERS, 1))
+    allocate(bn2_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV2_FILTERS, 1))
+    allocate(pool2_out(INPUT_WIDTH/4, INPUT_HEIGHT/4, CONV2_FILTERS, 1))
+    allocate(conv3_out(INPUT_WIDTH/4, INPUT_HEIGHT/4, CONV3_FILTERS, 1))
+    print *, "✓ Arrays allocated"
+    print *, ""
+    
+    ! Prepare first image
+    print *, "Preparing first test image..."
+    call prepare_input_image(test_images(1,:), d_input)
+    
+    ! Export input for verification
+    call export_activation_debug("input", d_input, export_dir)
+    
+    ! Run inference with layer exports
+    print *, ""
+    print *, "Running inference and exporting activations..."
+    print *, ""
+    
+    ! NOTE: This is a simplified inference - we would need cuDNN handles
+    ! For now, just export the input and placeholder outputs
+    ! The actual inference would require full cuDNN setup
+    
+    print *, "⚠️  WARNING: Full inference requires cuDNN setup"
+    print *, "    This version only exports input for now"
+    print *, "    To complete: add cuDNN conv/bn/pool operations"
+    print *, ""
+    
+    ! Cleanup
+    deallocate(test_images, test_labels)
+    deallocate(d_input, conv1_out, bn1_out, pool1_out)
+    deallocate(conv2_out, bn2_out, pool2_out, conv3_out)
+    
+    print *, "======================================================================"
+    print *, "✅ Debug export complete!"
+    print *, "======================================================================"
+    
+contains
+
+    subroutine load_model_weights(model_dir)
+        character(len=*), intent(in) :: model_dir
+        real(4), allocatable :: host_w(:,:,:,:), host_b(:)
+        real(4), allocatable :: host_1d(:)
+        
+        ! Allocate device weight arrays
+        allocate(conv1_w(KERNEL_SIZE, KERNEL_SIZE, INPUT_CHANNELS, CONV1_FILTERS))
+        allocate(conv1_b(CONV1_FILTERS))
+        allocate(bn1_scale(CONV1_FILTERS), bn1_bias(CONV1_FILTERS))
+        allocate(bn1_mean(CONV1_FILTERS), bn1_var(CONV1_FILTERS))
+        
+        ! Load Conv1 weights
+        allocate(host_w(KERNEL_SIZE, KERNEL_SIZE, INPUT_CHANNELS, CONV1_FILTERS))
+        open(unit=20, file=trim(model_dir)//'conv1_weights.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_w
+        close(20)
+        conv1_w = host_w
+        deallocate(host_w)
+        
+        ! Load Conv1 bias
+        allocate(host_b(CONV1_FILTERS))
+        open(unit=20, file=trim(model_dir)//'conv1_bias.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_b
+        close(20)
+        conv1_b = host_b
+        deallocate(host_b)
+        
+        ! Load BN1 parameters
+        allocate(host_1d(CONV1_FILTERS))
+        open(unit=20, file=trim(model_dir)//'bn1_scale.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_1d
+        close(20)
+        bn1_scale = host_1d
+        
+        open(unit=20, file=trim(model_dir)//'bn1_bias.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_1d
+        close(20)
+        bn1_bias = host_1d
+        
+        open(unit=20, file=trim(model_dir)//'bn1_running_mean.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_1d
+        close(20)
+        bn1_mean = host_1d
+        
+        open(unit=20, file=trim(model_dir)//'bn1_running_var.bin', &
+             form='unformatted', access='stream', status='old')
+        read(20) host_1d
+        close(20)
+        bn1_var = host_1d
+        deallocate(host_1d)
+        
+        print *, "  ✓ Conv1 and BN1 loaded"
+        
+        ! TODO: Load remaining layers (Conv2, BN2, Conv3, BN3)
+        ! For now, just loading first layer to test
+        
+    end subroutine load_model_weights
+    
+    subroutine prepare_input_image(flat_image, d_input_array)
+        real(4), intent(in) :: flat_image(3072)
+        real(4), device, intent(inout) :: d_input_array(:,:,:,:)
+        real(4) :: host_img(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS)
+        real(4) :: temp_chw(INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH)
+        integer :: idx, c, h, w
+        
+        ! Reshape from flat C-order to (C, H, W)
+        idx = 1
+        do c = 1, INPUT_CHANNELS
+            do h = 1, INPUT_HEIGHT
+                do w = 1, INPUT_WIDTH
+                    temp_chw(c, h, w) = flat_image(idx)
+                    idx = idx + 1
+                end do
+            end do
+        end do
+        
+        ! Convert from (C, H, W) to (W, H, C) for Fortran's layout
+        do c = 1, INPUT_CHANNELS
+            do h = 1, INPUT_HEIGHT
+                do w = 1, INPUT_WIDTH
+                    host_img(w, h, c) = temp_chw(c, h, w)
+                end do
+            end do
+        end do
+        
+        d_input_array(:,:,:,1) = host_img
+        print *, "  ✓ Input image prepared"
+    end subroutine prepare_input_image
+
+end program debug_inference

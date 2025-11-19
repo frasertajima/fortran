@@ -1,0 +1,167 @@
+! Debug test program - runs inference on first test image and exports intermediate outputs
+program debug_test
+    use cudafor
+    use model_export
+    implicit none
+    
+    ! Model parameters
+    integer, parameter :: INPUT_HEIGHT = 32
+    integer, parameter :: INPUT_WIDTH = 32
+    integer, parameter :: INPUT_CHANNELS = 3
+    integer, parameter :: CONV1_FILTERS = 32
+    integer, parameter :: CONV2_FILTERS = 64
+    integer, parameter :: CONV3_FILTERS = 128
+    integer, parameter :: NUM_CLASSES = 10
+    
+    ! Test data
+    real(4), allocatable :: test_images(:,:)
+    integer, allocatable :: test_labels(:)
+    real(4), device, allocatable :: d_input(:,:,:,:)
+    
+    ! Model arrays (simplified - just what we need for inference)
+    real(4), device, allocatable :: conv1_out(:,:,:,:)
+    real(4), device, allocatable :: bn1_out(:,:,:,:)
+    real(4), device, allocatable :: pool1_out(:,:,:,:)
+    real(4), device, allocatable :: conv2_out(:,:,:,:)
+    real(4), device, allocatable :: bn2_out(:,:,:,:)
+    real(4), device, allocatable :: pool2_out(:,:,:,:)
+    real(4), device, allocatable :: conv3_out(:,:,:,:)
+    real(4), device, allocatable :: bn3_out(:,:,:,:)
+    real(4), device, allocatable :: pool3_out(:,:,:,:)
+    real(4), device, allocatable :: flatten(:,:)
+    real(4), device, allocatable :: fc1_out(:,:)
+    real(4), device, allocatable :: fc2_out(:,:)
+    real(4), device, allocatable :: fc3_out(:,:)
+    
+    integer :: i, istat
+    character(len=256) :: export_dir
+    
+    print *, "======================================================================"
+    print *, "🔍 DEBUG: Running inference on first test image"
+    print *, "======================================================================"
+    print *, ""
+    
+    ! Load test data
+    print *, "Loading test data..."
+    allocate(test_images(10000, 3072))  ! Match training code: (N, features)
+    allocate(test_labels(10000))
+    
+    open(unit=10, file='datasets/cifar10/cifar10_data/images_test.bin', &
+         form='unformatted', access='stream', status='old')
+    read(10) test_images
+    close(10)
+    
+    open(unit=10, file='datasets/cifar10/cifar10_data/labels_test.bin', &
+         form='unformatted', access='stream', status='old')
+    read(10) test_labels
+    close(10)
+    
+    print *, "✓ Test data loaded"
+    print *, "  First image label:", test_labels(1)
+    print *, ""
+    
+    ! Allocate device arrays for single image
+    allocate(d_input(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, 1))
+    allocate(conv1_out(INPUT_WIDTH, INPUT_HEIGHT, CONV1_FILTERS, 1))
+    allocate(bn1_out(INPUT_WIDTH, INPUT_HEIGHT, CONV1_FILTERS, 1))
+    allocate(pool1_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV1_FILTERS, 1))
+    allocate(conv2_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV2_FILTERS, 1))
+    allocate(bn2_out(INPUT_WIDTH/2, INPUT_HEIGHT/2, CONV2_FILTERS, 1))
+    allocate(pool2_out(INPUT_WIDTH/4, INPUT_HEIGHT/4, CONV2_FILTERS, 1))
+    allocate(conv3_out(INPUT_WIDTH/4, INPUT_HEIGHT/4, CONV3_FILTERS, 1))
+    allocate(bn3_out(INPUT_WIDTH/4, INPUT_HEIGHT/4, CONV3_FILTERS, 1))
+    allocate(pool3_out(INPUT_WIDTH/8, INPUT_HEIGHT/8, CONV3_FILTERS, 1))
+    allocate(flatten(1, CONV3_FILTERS * (INPUT_HEIGHT/8) * (INPUT_WIDTH/8)))
+    allocate(fc1_out(1, 512))
+    allocate(fc2_out(1, 256))
+    allocate(fc3_out(1, NUM_CLASSES))
+    
+    print *, "✓ Arrays allocated"
+    print *, ""
+    
+    ! Copy first image to device
+    ! test_images is (10000, 3072) where each row is one image in C-order: (C,H,W) flattened
+    block
+        real(4) :: host_img(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS)
+        real(4) :: temp_chw(INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH)
+        integer :: idx, c, h, w
+        
+        ! First, reshape from flat C-order to (C, H, W)
+        idx = 1
+        do c = 1, INPUT_CHANNELS
+            do h = 1, INPUT_HEIGHT
+                do w = 1, INPUT_WIDTH
+                    temp_chw(c, h, w) = test_images(1, idx)  ! Row 1, column idx
+                    idx = idx + 1
+                end do
+            end do
+        end do
+        
+        ! Then convert from (C, H, W) to (W, H, C) for Fortran's layout
+        do c = 1, INPUT_CHANNELS
+            do h = 1, INPUT_HEIGHT
+                do w = 1, INPUT_WIDTH
+                    host_img(w, h, c) = temp_chw(c, h, w)
+                end do
+            end do
+        end do
+        
+        d_input(:,:,:,1) = host_img
+    end block
+    
+    print *, "✓ First image copied to device"
+    print *, ""
+    
+    ! NOTE: For this debug test, we're just exporting the INPUT
+    ! The actual inference would require loading the full model
+    ! For now, just export the input and placeholder outputs
+    
+    ! Initialize outputs to zero (placeholder)
+    conv1_out = 0.0
+    bn1_out = 0.0
+    pool1_out = 0.0
+    conv2_out = 0.0
+    bn2_out = 0.0
+    pool2_out = 0.0
+    conv3_out = 0.0
+    bn3_out = 0.0
+    pool3_out = 0.0
+    flatten = 0.0
+    fc1_out = 0.0
+    fc2_out = 0.0
+    fc3_out = 0.0
+    
+    ! Export input image for verification
+    export_dir = "datasets/cifar10/saved_models/cifar10/"
+    
+    block
+        real(4), allocatable :: host_input(:,:,:,:)
+        integer :: dims(4)
+        
+        dims = shape(d_input)
+        allocate(host_input(dims(1), dims(2), dims(3), 1))
+        host_input = d_input
+        
+        open(unit=99, file=trim(export_dir)//"debug_input.bin", &
+             form='unformatted', access='stream', status='replace')
+        write(99) host_input
+        close(99)
+        
+        deallocate(host_input)
+    end block
+    
+    print *, "✓ Input image exported to debug_input.bin"
+    print *, ""
+    print *, "======================================================================"
+    print *, "NOTE: Full inference requires loading the trained model"
+    print *, "      This debug program only exports the input for now"
+    print *, "======================================================================"
+    
+    ! Cleanup
+    deallocate(test_images, test_labels)
+    deallocate(d_input, conv1_out, bn1_out, pool1_out)
+    deallocate(conv2_out, bn2_out, pool2_out)
+    deallocate(conv3_out, bn3_out, pool3_out)
+    deallocate(flatten, fc1_out, fc2_out, fc3_out)
+    
+end program debug_test
