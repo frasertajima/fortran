@@ -1,0 +1,152 @@
+!================================================================
+! SVHN Dataset Configuration - v28 Baseline
+!================================================================
+! Dataset-specific configuration and data loading for SVHN
+! (Street View House Numbers)
+!
+! Dataset Info:
+!   - 73,257 training images
+!   - 26,032 test images
+!   - 10 classes (digits 0-9)
+!   - 32x32x3 RGB images
+!   - Data format: Python-preprocessed binaries
+!
+! Key differences from CIFAR-10:
+!   - More training samples (73K vs 50K)
+!   - More test samples (26K vs 10K)
+!   - Different data directory
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-16
+!================================================================
+module dataset_config
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    !================================================================
+    ! DATASET PARAMETERS - SVHN Specific
+    !================================================================
+    integer, parameter, public :: train_samples = 73257  ! ← Different!
+    integer, parameter, public :: test_samples = 26032   ! ← Different!
+    integer, parameter, public :: num_classes = 10
+    integer, parameter, public :: INPUT_CHANNELS = 3
+    integer, parameter, public :: INPUT_HEIGHT = 32
+    integer, parameter, public :: INPUT_WIDTH = 32
+    integer, parameter, public :: input_size = 3072  ! 3*32*32
+
+    ! Data directory
+    character(len=*), parameter :: DATA_DIR = 'svhn_data/'  ! ← Different!
+    character(len=*), parameter, public :: DATASET_NAME = 'SVHN'
+
+    !================================================================
+    ! CNN ARCHITECTURE PARAMETERS
+    !================================================================
+    integer, parameter, public :: CONV1_FILTERS = 32
+    integer, parameter, public :: CONV2_FILTERS = 64
+    integer, parameter, public :: CONV3_FILTERS = 128
+    integer, parameter, public :: KERNEL_SIZE = 3
+    integer, parameter, public :: PADDING = 1
+    integer, parameter, public :: STRIDE = 1
+    integer, parameter, public :: POOL_SIZE = 2
+    integer, parameter, public :: POOL_STRIDE = 2
+
+    !================================================================
+    ! GPU MEMORY FOR DATASET
+    !================================================================
+    real(4), device, allocatable, public :: gpu_train_data(:,:)
+    integer, device, allocatable, public :: gpu_train_labels(:)
+    real(4), device, allocatable, public :: gpu_test_data(:,:)
+    integer, device, allocatable, public :: gpu_test_labels(:)
+
+    logical :: data_loaded = .false.
+
+    public :: load_dataset, is_data_loaded
+
+contains
+
+    !================================================================
+    ! Load SVHN from Python-preprocessed binary files
+    !================================================================
+    subroutine load_dataset()
+        real(4), allocatable :: train_images(:,:)
+        real(4), allocatable :: test_images(:,:)
+        integer, allocatable :: train_labels(:)
+        integer, allocatable :: test_labels(:)
+        integer :: stat
+
+        print *, "======================================================================"
+        print *, "Loading SVHN Dataset (v28 Baseline)"
+        print *, "======================================================================"
+
+        allocate(train_images(train_samples, input_size))
+        allocate(train_labels(train_samples))
+        allocate(test_images(test_samples, input_size))
+        allocate(test_labels(test_samples))
+
+        print *, "Loading training images..."
+        open(unit=10, file=DATA_DIR//'images_train.bin', form='unformatted', &
+             access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Cannot open images_train.bin"
+            print *, "Run: python prepare_svhn.py"
+            stop
+        endif
+        read(10) train_images
+        close(10)
+
+        open(unit=10, file=DATA_DIR//'labels_train.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) train_labels
+        close(10)
+
+        print *, "Loading test images..."
+        open(unit=10, file=DATA_DIR//'images_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) test_images
+        close(10)
+
+        open(unit=10, file=DATA_DIR//'labels_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) test_labels
+        close(10)
+
+        print *, "✅ Data loaded successfully!"
+        print *, "  Training samples:", train_samples
+        print *, "  Test samples:    ", test_samples
+        print *, "  Image size:      ", INPUT_HEIGHT, "x", INPUT_WIDTH, "x", INPUT_CHANNELS
+        print *, "  Classes:         ", num_classes
+
+        print *, ""
+        print *, "Data Statistics:"
+        print *, "  Train images - Min:", minval(train_images), " Max:", maxval(train_images)
+        print *, "  Train labels - Min:", minval(train_labels), " Max:", maxval(train_labels)
+        print *, "  Test images  - Min:", minval(test_images), " Max:", maxval(test_images)
+        print *, "  Test labels  - Min:", minval(test_labels), " Max:", maxval(test_labels)
+
+        print *, ""
+        print *, "Transferring to GPU..."
+        allocate(gpu_train_data(train_samples, input_size))
+        allocate(gpu_train_labels(train_samples))
+        allocate(gpu_test_data(test_samples, input_size))
+        allocate(gpu_test_labels(test_samples))
+
+        gpu_train_data = train_images
+        gpu_train_labels = train_labels
+        gpu_test_data = test_images
+        gpu_test_labels = test_labels
+
+        deallocate(train_images, test_images, train_labels, test_labels)
+
+        data_loaded = .true.
+        print *, "✅ GPU transfer complete!"
+        print *, "======================================================================"
+        print *, ""
+    end subroutine load_dataset
+
+    function is_data_loaded() result(loaded)
+        logical :: loaded
+        loaded = data_loaded
+    end function is_data_loaded
+
+end module dataset_config
