@@ -58,6 +58,7 @@ Start with these documents in order:
 
 ## Use Jupyter notebook as normal for intereference and other statistical tests:
 
+<img width="990" height="459" alt="Screenshot From 2025-11-19 15-35-47" src="https://github.com/user-attachments/assets/59a896f8-07e6-4e8c-a0bc-de69fcfbbd83" />
 <img width="981" height="844" alt="Screenshot From 2025-11-19 14-51-03" src="https://github.com/user-attachments/assets/c684c489-78ca-4f18-b0d2-8e461e8ec9d9" />
 <img width="1325" height="973" alt="Screenshot From 2025-11-19 13-19-33" src="https://github.com/user-attachments/assets/ccdf7f37-28e9-464e-b890-5dcba02b834e" />
 <img width="1325" height="1031" alt="Screenshot From 2025-11-19 12-52-09" src="https://github.com/user-attachments/assets/f07d8eb2-9e5b-4746-8b88-01ae81ce2111" />
