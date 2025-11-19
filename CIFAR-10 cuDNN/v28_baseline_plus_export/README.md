@@ -1,45 +1,18 @@
-# CIFAR-10 cuDNN - Modular CUDA Fortran Training
+# CIFAR-10 cuDNN - Modular CUDA fortran training with export to python
 
 **High-performance, modular CNN training framework in CUDA Fortran**
 
 ## 🎯 What's Here
 
-This repository contains the **v28 Baseline** - a production-ready, modular CUDA Fortran framework for training CNNs on GPU.
+This repository contains the **v28 Baseline plus export modules** - a production-ready, modular CUDA Fortran framework for training CNNs on GPU.
 
 ### Key Features
 
-- ✅ **2× faster than PyTorch** (31s vs 61s on CIFAR-10)
+- ✅ **4× faster than PyTorch** (31s vs 146s on CIFAR-10)
 - ✅ **Fully modular** - add new datasets in <2 hours
 - ✅ **Validated on 4 datasets** - CIFAR-10, CIFAR-100, SVHN, Fashion-MNIST
 - ✅ **Comprehensive documentation** - design, architecture, and adaptation guides
 
-## 📁 Repository Structure
-
-```
-v28_baseline/              # Main framework (START HERE!)
-├── README.md              # Quick start guide
-├── MODULAR_ADAPTATION_GUIDE.md  # How to adapt to new datasets
-├── V28_BASELINE_SUMMARY.md      # Project summary
-├── FASHION_MNIST_ADAPTATION.md  # Case study
-│
-├── common/                # Reusable modules (885 lines, 100% reusable)
-│   ├── random_utils.cuf
-│   ├── adam_optimizer.cuf
-│   ├── gpu_batch_extraction.cuf
-│   └── cuda_utils.cuf
-│
-├── datasets/              # Dataset configs (~150 lines each)
-│   ├── cifar10/
-│   ├── cifar100/
-│   ├── svhn/
-│   ├── fashion_mnist/
-│   └── oxford_flowers/
-│
-└── docs/                  # Technical documentation
-    ├── ARCHITECTURE.md
-    ├── MODULARITY_GUIDE.md
-    └── ADDING_NEW_DATASET.md
-```
 
 ## 🚀 Quick Start
 
@@ -70,22 +43,29 @@ python prepare_cifar10.py
 
 Start with these documents in order:
 
-1. **`v28_baseline/MODULAR_ADAPTATION_GUIDE.md`** - High-level overview
-2. **`v28_baseline/README.md`** - Quick start guide
-3. **`v28_baseline/docs/ARCHITECTURE.md`** - System design
-4. **`v28_baseline/FASHION_MNIST_ADAPTATION.md`** - Real-world case study
+1. **`v28_baseline_plus_export/MODULAR_ADAPTATION_GUIDE.md`** - High-level overview
+2. **`v28_baseline_plus_export/README.md`** - Quick start guide
+3. **`v28_baseline_plus_export/docs/ARCHITECTURE.md`** - System design
+4. **`v28_baseline_plus_export/FASHION_MNIST_ADAPTATION.md`** - Real-world case study
 
 ## 🏆 Why v28 Baseline?
 
 **Before**: 12,114 lines of duplicated code across 3 datasets (90% duplication)
 **After**: 1,500 lines total (0% duplication, 100% reusable)
 
-**Performance**: Same 2× speedup over PyTorch
+**Performance**: Same 4× speedup over PyTorch
 **Modularity**: PyTorch-level modularity achieved!
+
+## Use Jupyter notebook as normal for intereference and other statistical tests:
+
+<img width="981" height="844" alt="Screenshot From 2025-11-19 14-51-03" src="https://github.com/user-attachments/assets/c684c489-78ca-4f18-b0d2-8e461e8ec9d9" />
+<img width="1325" height="973" alt="Screenshot From 2025-11-19 13-19-33" src="https://github.com/user-attachments/assets/ccdf7f37-28e9-464e-b890-5dcba02b834e" />
+<img width="1325" height="1031" alt="Screenshot From 2025-11-19 12-52-09" src="https://github.com/user-attachments/assets/f07d8eb2-9e5b-4746-8b88-01ae81ce2111" />
+
 
 ## 🎓 Learn More
 
-See `v28_baseline/` for complete documentation including:
+See `v28_baseline_plus_export/` for complete documentation including:
 - How the modularity works
 - How to adapt to new datasets
 - Design principles and best practices
@@ -95,4 +75,4 @@ See `v28_baseline/` for complete documentation including:
 
 **Repository**: https://github.com/frasertajima/CIFAR-10
 **Status**: ✅ Production-ready
-**Last Updated**: 2025-11-17
+**Last Updated**: 2025-11-19
