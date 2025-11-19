@@ -1,0 +1,162 @@
+!================================================================
+! Fashion-MNIST Dataset Configuration - v28 Baseline
+!================================================================
+! Dataset-specific configuration and data loading for Fashion-MNIST
+!
+! This module defines ONLY dataset-specific parameters and data
+! loading. All training logic is in the common modules!
+!
+! Dataset Info:
+!   - 60,000 training images
+!   - 10,000 test images
+!   - 10 classes (T-shirt/top, Trouser, Pullover, Dress, Coat, 
+!     Sandal, Shirt, Sneaker, Bag, Ankle boot)
+!   - 28x28x1 grayscale images
+!   - Data format: Python-preprocessed binaries (same as CIFAR-10)
+!
+! Usage:
+!   1. Run prepare_fashion_mnist.py (creates fashion_mnist_data/*.bin)
+!   2. call load_dataset()
+!   3. Use gpu_train_data, gpu_train_labels, etc.
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-16
+!================================================================
+module dataset_config
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    !================================================================
+    ! DATASET PARAMETERS - Fashion-MNIST Specific
+    !================================================================
+    integer, parameter, public :: train_samples = 60000
+    integer, parameter, public :: test_samples = 10000
+    integer, parameter, public :: num_classes = 10
+    integer, parameter, public :: INPUT_CHANNELS = 1
+    integer, parameter, public :: INPUT_HEIGHT = 28
+    integer, parameter, public :: INPUT_WIDTH = 28
+    integer, parameter, public :: input_size = 784  ! 1*28*28
+
+    ! Data directory
+    character(len=*), parameter :: DATA_DIR = 'fashion_mnist_data/'
+    character(len=*), parameter, public :: DATASET_NAME = 'Fashion-MNIST'
+
+    !================================================================
+    ! CNN ARCHITECTURE PARAMETERS
+    !================================================================
+    ! These can be customized per dataset if needed
+    integer, parameter, public :: CONV1_FILTERS = 32
+    integer, parameter, public :: CONV2_FILTERS = 64
+    integer, parameter, public :: CONV3_FILTERS = 128
+    integer, parameter, public :: KERNEL_SIZE = 3
+    integer, parameter, public :: PADDING = 1
+    integer, parameter, public :: STRIDE = 1
+    integer, parameter, public :: POOL_SIZE = 2
+    integer, parameter, public :: POOL_STRIDE = 2
+
+    !================================================================
+    ! GPU MEMORY FOR DATASET
+    !================================================================
+    real(4), device, allocatable, public :: gpu_train_data(:,:)     ! (60000, 784)
+    integer, device, allocatable, public :: gpu_train_labels(:)     ! (60000)
+    real(4), device, allocatable, public :: gpu_test_data(:,:)      ! (10000, 784)
+    integer, device, allocatable, public :: gpu_test_labels(:)      ! (10000)
+
+    logical :: data_loaded = .false.
+
+    ! Public interface
+    public :: load_dataset, is_data_loaded
+
+contains
+
+    !================================================================
+    ! Load Fashion-MNIST from Python-preprocessed binary files
+    !================================================================
+    subroutine load_dataset()
+        real(4), allocatable :: train_images(:,:)  ! (60000, 784)
+        real(4), allocatable :: test_images(:,:)   ! (10000, 784)
+        integer, allocatable :: train_labels(:)    ! (60000)
+        integer, allocatable :: test_labels(:)     ! (10000)
+        integer :: stat
+
+        if (data_loaded) then
+            print *, "⚠️  Dataset already loaded, skipping"
+            return
+        endif
+
+        print *, "📂 Loading Fashion-MNIST from binary files..."
+
+        ! Allocate host arrays
+        allocate(train_images(train_samples, input_size))
+        allocate(test_images(test_samples, input_size))
+        allocate(train_labels(train_samples))
+        allocate(test_labels(test_samples))
+
+        ! Read training data
+        open(unit=10, file=trim(DATA_DIR)//'images_train.bin', &
+             form='unformatted', access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Could not open ", trim(DATA_DIR)//'images_train.bin'
+            stop
+        endif
+        read(10) train_images
+        close(10)
+
+        open(unit=11, file=trim(DATA_DIR)//'labels_train.bin', &
+             form='unformatted', access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Could not open ", trim(DATA_DIR)//'labels_train.bin'
+            stop
+        endif
+        read(11) train_labels
+        close(11)
+
+        ! Read test data
+        open(unit=12, file=trim(DATA_DIR)//'images_test.bin', &
+             form='unformatted', access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Could not open ", trim(DATA_DIR)//'images_test.bin'
+            stop
+        endif
+        read(12) test_images
+        close(12)
+
+        open(unit=13, file=trim(DATA_DIR)//'labels_test.bin', &
+             form='unformatted', access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Could not open ", trim(DATA_DIR)//'labels_test.bin'
+            stop
+        endif
+        read(13) test_labels
+        close(13)
+
+        print *, "   ✓ Training: ", train_samples, " images"
+        print *, "   ✓ Test:     ", test_samples, " images"
+
+        ! Allocate and copy to GPU
+        allocate(gpu_train_data(train_samples, input_size))
+        allocate(gpu_train_labels(train_samples))
+        allocate(gpu_test_data(test_samples, input_size))
+        allocate(gpu_test_labels(test_samples))
+
+        gpu_train_data = train_images
+        gpu_train_labels = train_labels
+        gpu_test_data = test_images
+        gpu_test_labels = test_labels
+
+        deallocate(train_images, test_images, train_labels, test_labels)
+
+        data_loaded = .true.
+        print *, "✅ Fashion-MNIST loaded to GPU"
+    end subroutine load_dataset
+
+    !================================================================
+    ! Check if data is loaded
+    !================================================================
+    function is_data_loaded() result(loaded)
+        logical :: loaded
+        loaded = data_loaded
+    end function is_data_loaded
+
+end module dataset_config
