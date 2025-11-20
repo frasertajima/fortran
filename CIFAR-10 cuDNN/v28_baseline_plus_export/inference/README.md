@@ -14,7 +14,7 @@ This directory contains tools for exporting trained v28 models and loading them 
 - Handles Fortran binary format (column-major → row-major conversion)
 - Returns ready-to-use PyTorch model in eval mode
 
-### Jupyter Notebook (Coming Soon)
+### Jupyter Notebook
 - **`inference_demo.ipynb`** - Interactive inference demonstrations
 - Visualizations, predictions, confusion matrices
 
@@ -189,8 +189,8 @@ The key is using `order='F'` to match Fortran's column-major layout.
 1. ✅ Export module created
 2. ✅ Python loader created
 3. 🔄 Integrate into training scripts (you do this)
-4. 📓 Create Jupyter inference notebook (coming soon)
-5. 📊 Add visualization tools (coming soon)
+4. 📓 Create Jupyter inference notebook
+5. 📊 Add visualization tools
 
 ---
 
