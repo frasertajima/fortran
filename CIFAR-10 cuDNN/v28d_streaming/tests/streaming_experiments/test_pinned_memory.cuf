@@ -1,0 +1,86 @@
+! test_pinned_memory.cuf - Compare pinned vs pageable memory transfer speeds
+! Compile: nvfortran -cuda -O3 -o test_pinned test_pinned_memory.cuf
+! Run: ./test_pinned
+
+program test_pinned_memory
+    use cudafor
+    implicit none
+
+    integer, parameter :: N = 10000000  ! 10M elements
+    integer, parameter :: TRIALS = 10
+
+    real(4), allocatable :: h_pageable(:)
+    real(4), pointer :: h_pinned(:)
+    real(4), device :: d_data(N)
+
+    type(cudaEvent) :: start, stop
+    real(4) :: elapsed_pageable, elapsed_pinned
+    integer :: i, istat
+    type(c_ptr) :: cptr
+
+    print *, "============================================"
+    print *, "Pinned vs Pageable Memory Transfer Test"
+    print *, "============================================"
+    print *, "Array size:", N, "elements (", N*4/1024/1024, "MB)"
+    print *, ""
+
+    ! Create timing events
+    istat = cudaEventCreate(start)
+    istat = cudaEventCreate(stop)
+
+    ! Allocate pageable memory (regular)
+    allocate(h_pageable(N))
+    h_pageable = 1.0
+
+    ! Allocate pinned memory
+    istat = cudaMallocHost(cptr, N * 4)
+    if (istat /= 0) then
+        print *, "ERROR: cudaMallocHost failed"
+        stop 1
+    endif
+    call c_f_pointer(cptr, h_pinned, [N])
+    h_pinned = 1.0
+
+    ! Warm up
+    d_data = h_pageable
+    istat = cudaDeviceSynchronize()
+
+    ! Test pageable memory transfer
+    elapsed_pageable = 0.0
+    do i = 1, TRIALS
+        istat = cudaEventRecord(start, 0)
+        d_data = h_pageable
+        istat = cudaEventRecord(stop, 0)
+        istat = cudaEventSynchronize(stop)
+        call cudaEventElapsedTime(elapsed_pageable, start, stop)
+        elapsed_pageable = elapsed_pageable + elapsed_pageable
+    end do
+    elapsed_pageable = elapsed_pageable / TRIALS
+
+    ! Test pinned memory transfer
+    elapsed_pinned = 0.0
+    do i = 1, TRIALS
+        istat = cudaEventRecord(start, 0)
+        d_data = h_pinned
+        istat = cudaEventRecord(stop, 0)
+        istat = cudaEventSynchronize(stop)
+        call cudaEventElapsedTime(elapsed_pinned, start, stop)
+        elapsed_pinned = elapsed_pinned + elapsed_pinned
+    end do
+    elapsed_pinned = elapsed_pinned / TRIALS
+
+    print *, "Results (average of", TRIALS, "trials):"
+    print *, "  Pageable memory: ", elapsed_pageable, "ms"
+    print *, "  Pinned memory:   ", elapsed_pinned, "ms"
+    print *, "  Speedup:         ", elapsed_pageable / elapsed_pinned, "x"
+    print *, ""
+
+    ! Cleanup
+    deallocate(h_pageable)
+    istat = cudaFreeHost(cptr)
+    istat = cudaEventDestroy(start)
+    istat = cudaEventDestroy(stop)
+
+    print *, "Test completed!"
+
+end program test_pinned_memory
