@@ -1,0 +1,41 @@
+program test_data_layout
+    use cudafor
+    implicit none
+    
+    real(4), allocatable :: full_data(:,:)
+    real(4), allocatable :: stream_data(:,:)
+    integer :: i
+    
+    ! Full RAM style: read into (N, features)
+    allocate(full_data(50000, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    print *, "Full RAM mode - sample 0, features 0-4:"
+    print *, full_data(1, 1:5)
+    print *, "Full RAM mode - sample 1, features 0-4:"
+    print *, full_data(2, 1:5)
+    
+    ! Streaming style: read batch into (features, batch_size)
+    allocate(stream_data(3072, 128))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) stream_data
+    close(10)
+    
+    print *, ""
+    print *, "Streaming mode - sample 0, features 0-4:"
+    print *, stream_data(1:5, 1)
+    print *, "Streaming mode - sample 1, features 0-4:"
+    print *, stream_data(1:5, 2)
+    
+    ! Check if they match
+    print *, ""
+    if (abs(full_data(1,1) - stream_data(1,1)) < 1e-6) then
+        print *, "MATCH: Data layouts are compatible!"
+    else
+        print *, "MISMATCH: Data layouts differ!"
+        print *, "  Full[1,1]=", full_data(1,1), " Stream[1,1]=", stream_data(1,1)
+    endif
+    
+end program

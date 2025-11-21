@@ -1,0 +1,276 @@
+!================================================================
+! CIFAR-10 Dataset Configuration - v28d Streaming Support
+!================================================================
+! Configuration for CIFAR-10 with optional streaming mode.
+!
+! Modes:
+!   - Full RAM (default): Loads entire dataset into managed memory
+!   - Streaming (--stream): Streams from disk, constant memory usage
+!
+! Dataset Info:
+!   - Training samples: AUTO-DETECTED from binary file size
+!   - 10,000 test images
+!   - 10 classes
+!   - 32x32x3 RGB images
+!
+! Usage:
+!   ./cifar10_train              # Full RAM mode
+!   ./cifar10_train --stream     # Streaming mode
+!
+! Author: v28d Streaming Team
+! Date: 2025-11-21
+!================================================================
+module dataset_config
+    use cudafor
+    use iso_c_binding
+    use streaming_data_loader
+    use cmdline_args
+    implicit none
+
+    !================================================================
+    ! DATASET PARAMETERS
+    !================================================================
+    integer, parameter :: train_samples_default = 50000
+    integer, parameter, public :: test_samples = 10000
+
+    ! Actual number of samples (set during loading)
+    integer, public :: train_samples
+    integer, parameter, public :: num_classes = 10
+    integer, parameter, public :: INPUT_CHANNELS = 3
+    integer, parameter, public :: INPUT_HEIGHT = 32
+    integer, parameter, public :: INPUT_WIDTH = 32
+    integer, parameter, public :: input_size = 3072  ! 3*32*32
+
+    ! Data directory and files
+    character(len=*), parameter :: DATA_DIR = 'cifar10_data/'
+    character(len=*), parameter, public :: DATASET_NAME = 'CIFAR-10'
+
+    !================================================================
+    ! CNN ARCHITECTURE PARAMETERS
+    !================================================================
+    integer, parameter, public :: CONV1_FILTERS = 32
+    integer, parameter, public :: CONV2_FILTERS = 64
+    integer, parameter, public :: CONV3_FILTERS = 128
+    integer, parameter, public :: KERNEL_SIZE = 3
+    integer, parameter, public :: PADDING = 1
+    integer, parameter, public :: STRIDE = 1
+    integer, parameter, public :: POOL_SIZE = 2
+    integer, parameter, public :: POOL_STRIDE = 2
+
+    !================================================================
+    ! GPU MEMORY FOR DATASET
+    !================================================================
+    ! Full RAM mode: allocated and used
+    ! Streaming mode: only test data allocated, train data streamed
+    real(4), managed, allocatable, public :: gpu_train_data(:,:)
+    integer, managed, allocatable, public :: gpu_train_labels(:)
+    real(4), managed, allocatable, public :: gpu_test_data(:,:)
+    integer, managed, allocatable, public :: gpu_test_labels(:)
+
+    ! Streaming mode state
+    logical, public :: streaming_mode_active = .false.
+
+    logical :: data_loaded = .false.
+
+    ! Public interface
+    public :: load_dataset, is_data_loaded
+    public :: dataset_start_epoch, dataset_cleanup
+
+contains
+
+    !================================================================
+    ! Load Dataset (auto-selects mode based on --stream flag)
+    !================================================================
+    subroutine load_dataset()
+        integer :: stat
+        real :: dataset_size_gb
+        integer(8) :: file_size_bytes
+        integer :: detected_samples
+
+        ! Parse command line arguments
+        call parse_cmdline_args()
+
+        if (show_help) then
+            call print_usage("cifar10_train")
+            stop
+        endif
+
+        streaming_mode_active = use_streaming
+
+        print *, "======================================================================"
+        if (streaming_mode_active) then
+            print *, "Loading CIFAR-10 Dataset (v28d - STREAMING MODE)"
+        else
+            print *, "Loading CIFAR-10 Dataset (v28d - Full RAM Mode)"
+        endif
+        print *, "======================================================================"
+
+        ! Auto-detect number of training samples from file size
+        inquire(file=DATA_DIR//'images_train.bin', size=file_size_bytes, exist=data_loaded)
+        if (data_loaded .and. file_size_bytes > 0) then
+            detected_samples = int(file_size_bytes / (int(input_size, 8) * 4_8))
+            train_samples = detected_samples
+            print '(A,I8,A)', "   Auto-detected ", train_samples, " training samples"
+        else
+            train_samples = train_samples_default
+            print '(A,I8,A)', "   Using default ", train_samples, " training samples"
+        endif
+
+        dataset_size_gb = real(int(train_samples, 8) * int(input_size, 8) * 4_8) / (1024.0**3)
+
+        print '(A,I8)', "   Training samples: ", train_samples
+        print '(A,I8)', "   Test samples:     ", test_samples
+        print '(A,F8.2,A)', "   Dataset size:     ", dataset_size_gb, " GB"
+
+        if (streaming_mode_active) then
+            print *, "   Mode:             STREAMING (constant ~3 MB memory)"
+            call load_dataset_streaming()
+        else
+            print *, "   Mode:             FULL RAM (managed memory)"
+            call load_dataset_full_ram()
+        endif
+
+        data_loaded = .true.
+        print *, "======================================================================"
+        print *, ""
+
+    end subroutine load_dataset
+
+    !================================================================
+    ! Load in Full RAM Mode (original behavior)
+    !================================================================
+    subroutine load_dataset_full_ram()
+        integer :: stat
+        real :: dataset_size_gb
+
+        dataset_size_gb = real(int(train_samples, 8) * int(input_size, 8) * 4_8) / (1024.0**3) + &
+                          real(int(test_samples, 8) * int(input_size, 8) * 4_8) / (1024.0**3)
+
+        ! Allocate managed memory
+        print *, ""
+        print *, "Allocating managed memory..."
+        allocate(gpu_train_data(train_samples, input_size), stat=stat)
+        allocate(gpu_train_labels(train_samples), stat=stat)
+        allocate(gpu_test_data(test_samples, input_size), stat=stat)
+        allocate(gpu_test_labels(test_samples), stat=stat)
+        print '(A,F8.2,A)', "   Allocated ", dataset_size_gb, " GB"
+
+        ! Load training data
+        print *, ""
+        print *, "Loading data into managed memory..."
+
+        open(unit=10, file=DATA_DIR//'images_train.bin', form='unformatted', &
+             access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "ERROR: Cannot open ", DATA_DIR//'images_train.bin'
+            print *, "Run: python prepare_cifar10.py"
+            stop
+        endif
+        read(10) gpu_train_data
+        close(10)
+        print '(A,I8,A)', "   Loaded ", train_samples, " training images"
+
+        open(unit=10, file=DATA_DIR//'labels_train.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) gpu_train_labels
+        close(10)
+
+        ! Load test data (always in memory for evaluation)
+        open(unit=10, file=DATA_DIR//'images_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) gpu_test_data
+        close(10)
+
+        open(unit=10, file=DATA_DIR//'labels_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) gpu_test_labels
+        close(10)
+        print '(A,I8,A)', "   Loaded ", test_samples, " test images"
+
+        print *, ""
+        print *, "Dataset loaded successfully!"
+
+    end subroutine load_dataset_full_ram
+
+    !================================================================
+    ! Load in Streaming Mode
+    !================================================================
+    subroutine load_dataset_streaming()
+        integer :: stat
+        integer, parameter :: BATCH_SIZE = 128
+        ! Streaming uses sample-major format files with _stream suffix
+        ! This prevents accidental use of wrong format files
+        character(len=*), parameter :: STREAM_DIR = 'cifar10_data_streaming/'
+
+        ! Initialize streaming loader for training data (sample-major format)
+        ! NOTE: Files MUST have _stream suffix to ensure correct format
+        call streaming_init( &
+            STREAM_DIR//'images_train_stream.bin', &
+            STREAM_DIR//'labels_train_stream.bin', &
+            int(train_samples, 8), &
+            input_size, &
+            BATCH_SIZE)
+
+        call streaming_set_shuffle_mode(SHUFFLE_BLOCK, 50)
+
+        ! Load test data into memory (small, needed for evaluation)
+        print *, ""
+        print *, "Loading test data into memory..."
+        allocate(gpu_test_data(test_samples, input_size), stat=stat)
+        allocate(gpu_test_labels(test_samples), stat=stat)
+
+        open(unit=10, file=DATA_DIR//'images_test.bin', form='unformatted', &
+             access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "ERROR: Cannot open test images"
+            stop
+        endif
+        read(10) gpu_test_data
+        close(10)
+
+        open(unit=10, file=DATA_DIR//'labels_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) gpu_test_labels
+        close(10)
+        print '(A,I8,A)', "   Loaded ", test_samples, " test images"
+
+        print *, ""
+        print *, "Streaming mode ready!"
+        print *, "   Training data will stream from disk during training"
+
+    end subroutine load_dataset_streaming
+
+    !================================================================
+    ! Start new epoch (call at beginning of each epoch)
+    !================================================================
+    subroutine dataset_start_epoch()
+        if (streaming_mode_active) then
+            call streaming_start_epoch()
+        endif
+        ! Full RAM mode doesn't need this - shuffle handled by GPU indices
+    end subroutine dataset_start_epoch
+
+    !================================================================
+    ! Check if data is loaded
+    !================================================================
+    function is_data_loaded() result(loaded)
+        logical :: loaded
+        loaded = data_loaded
+    end function is_data_loaded
+
+    !================================================================
+    ! Cleanup
+    !================================================================
+    subroutine dataset_cleanup()
+        if (streaming_mode_active) then
+            call streaming_cleanup()
+        endif
+
+        if (allocated(gpu_train_data)) deallocate(gpu_train_data)
+        if (allocated(gpu_train_labels)) deallocate(gpu_train_labels)
+        if (allocated(gpu_test_data)) deallocate(gpu_test_data)
+        if (allocated(gpu_test_labels)) deallocate(gpu_test_labels)
+
+    end subroutine dataset_cleanup
+
+end module dataset_config

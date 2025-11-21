@@ -1,0 +1,41 @@
+program test_streaming_layout3
+    use cudafor
+    implicit none
+    
+    real(4), allocatable :: full_data(:,:)
+    real(4), allocatable :: raw_batch(:,:)
+    integer :: i
+    
+    print *, "=========================================="
+    print *, "  Raw File Read Test"
+    print *, "=========================================="
+    
+    ! Load full dataset - the working way
+    allocate(full_data(50000, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    print *, "Full data (50000, 3072):"
+    print *, "  Sample 0 features 0-4:", full_data(1, 1:5)
+    
+    ! Read just first batch worth directly - matching full_data layout
+    allocate(raw_batch(128, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) raw_batch
+    close(10)
+    
+    print *, ""
+    print *, "Raw batch read (128, 3072) - same layout as full:"
+    print *, "  Sample 0 features 0-4:", raw_batch(1, 1:5)
+    
+    ! Compare
+    if (abs(full_data(1,1) - raw_batch(1,1)) < 1e-6 .and. &
+        abs(full_data(1,2) - raw_batch(1,2)) < 1e-6 .and. &
+        abs(full_data(1,3) - raw_batch(1,3)) < 1e-6) then
+        print *, "  MATCH! Reading (batch_size, feature_size) works!"
+    else
+        print *, "  MISMATCH"
+    endif
+    
+end program

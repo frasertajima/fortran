@@ -1,0 +1,60 @@
+program test_streaming_sample_major
+    use cudafor
+    use streaming_data_loader
+    implicit none
+    
+    real(4), allocatable :: full_data(:,:)
+    real(4), managed, allocatable :: stream_data(:,:)
+    integer, managed, allocatable :: stream_labels(:)
+    integer :: actual_size, i, j, mismatches
+    real(4) :: diff
+    
+    print *, "=========================================="
+    print *, "  Sample-Major Streaming Test"
+    print *, "=========================================="
+    
+    ! Load full dataset from original (feature-major) file
+    allocate(full_data(50000, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    print *, "Full data from original file:"
+    print *, "  Sample 0 features 0-4:", full_data(1, 1:5)
+    print *, "  Sample 1 features 0-4:", full_data(2, 1:5)
+    
+    ! Initialize streaming from SAMPLE-MAJOR file
+    allocate(stream_data(3072, 128))
+    allocate(stream_labels(128))
+    
+    call streaming_init('cifar10_data_streaming/images_train.bin', &
+                        'cifar10_data_streaming/labels_train.bin', &
+                        50000_8, 3072, 128)
+    call streaming_set_shuffle_mode(SHUFFLE_NONE, 1)
+    call streaming_start_epoch()
+    call streaming_get_batch(stream_data, stream_labels, actual_size)
+    
+    print *, ""
+    print *, "Streaming from sample-major file:"
+    print *, "  Sample 0 features 0-4:", stream_data(1:5, 1)
+    print *, "  Sample 1 features 0-4:", stream_data(1:5, 2)
+    
+    ! Full comparison
+    mismatches = 0
+    do i = 1, 128
+        do j = 1, 3072
+            diff = abs(full_data(i, j) - stream_data(j, i))
+            if (diff > 1e-6) mismatches = mismatches + 1
+        end do
+    end do
+    
+    print *, ""
+    if (mismatches == 0) then
+        print *, "SUCCESS! All 128 samples x 3072 features MATCH!"
+    else
+        print *, "MISMATCH: ", mismatches, " differences found"
+    endif
+    
+    call streaming_cleanup()
+    
+end program

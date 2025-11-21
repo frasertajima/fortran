@@ -1,0 +1,94 @@
+program test_streaming_layout
+    use cudafor
+    use streaming_data_loader
+    implicit none
+    
+    ! Full RAM data
+    real(4), allocatable :: full_data(:,:)
+    integer, allocatable :: full_labels(:)
+    
+    ! Streaming data
+    real(4), managed, allocatable :: stream_data(:,:)
+    integer, managed, allocatable :: stream_labels(:)
+    integer :: actual_size
+    
+    integer :: i, mismatches
+    real(4) :: diff
+    
+    print *, "=========================================="
+    print *, "  Streaming Data Layout Test (NO SHUFFLE)"
+    print *, "=========================================="
+    
+    ! Load full dataset (the working way)
+    allocate(full_data(50000, 3072))
+    allocate(full_labels(50000))
+    
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    open(unit=10, file='cifar10_data/labels_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_labels
+    close(10)
+    
+    print *, ""
+    print *, "Full RAM mode (correct):"
+    print *, "  Shape: (50000, 3072)"
+    print *, "  Sample 0, features 0-4:", full_data(1, 1:5)
+    print *, "  Sample 1, features 0-4:", full_data(2, 1:5)
+    print *, "  Label 0:", full_labels(1)
+    print *, "  Label 1:", full_labels(2)
+    
+    ! Initialize streaming
+    allocate(stream_data(3072, 128))  ! (feature_size, batch_size)
+    allocate(stream_labels(128))
+    
+    call streaming_init('cifar10_data/images_train.bin', 'cifar10_data/labels_train.bin', &
+                        50000_8, 3072, 128)
+    ! DISABLE SHUFFLING for test
+    call streaming_set_shuffle_mode(SHUFFLE_NONE, 1)
+    call streaming_start_epoch()
+    
+    ! Get first batch
+    call streaming_get_batch(stream_data, stream_labels, actual_size)
+    
+    print *, ""
+    print *, "Streaming mode (NO SHUFFLE):"
+    print *, "  Output shape: (3072, 128) - (features, batch)"
+    print *, "  Actual batch size:", actual_size
+    print *, "  Sample 0, features 0-4:", stream_data(1:5, 1)
+    print *, "  Sample 1, features 0-4:", stream_data(1:5, 2)
+    print *, "  Label 0:", stream_labels(1)
+    print *, "  Label 1:", stream_labels(2)
+    
+    ! Compare first 128 samples
+    print *, ""
+    print *, "Comparison (should match!):"
+    mismatches = 0
+    do i = 1, 128
+        ! full_data(i, 1) is feature 1 of sample i
+        ! stream_data(1, i) should be feature 1 of sample i
+        diff = abs(full_data(i, 1) - stream_data(1, i))
+        if (diff > 1e-6) then
+            mismatches = mismatches + 1
+            if (mismatches <= 5) then
+                print *, "  DATA MISMATCH sample", i, ": full=", full_data(i,1), " stream=", stream_data(1,i)
+            endif
+        endif
+        if (full_labels(i) /= stream_labels(i)) then
+            if (mismatches <= 10) then
+                print *, "  LABEL MISMATCH sample", i, ": full=", full_labels(i), " stream=", stream_labels(i)
+            endif
+            mismatches = mismatches + 1
+        endif
+    end do
+    
+    if (mismatches == 0) then
+        print *, "  ALL 128 SAMPLES MATCH!"
+    else
+        print *, "  Total mismatches:", mismatches
+    endif
+    
+    call streaming_cleanup()
+    
+end program

@@ -1,0 +1,168 @@
+!================================================================
+! CIFAR-10 Dataset Configuration - v28 Baseline
+!================================================================
+! Dataset-specific configuration and data loading for CIFAR-10
+!
+! This module defines ONLY dataset-specific parameters and data
+! loading. All training logic is in the common modules!
+!
+! Dataset Info:
+!   - 50,000 training images
+!   - 10,000 test images
+!   - 10 classes
+!   - 32x32x3 RGB images
+!   - Data format: Python-preprocessed binaries (v27 pattern)
+!
+! Usage:
+!   1. Run prepare_cifar10.py (creates cifar10_data/*.bin)
+!   2. call load_dataset()
+!   3. Use gpu_train_data, gpu_train_labels, etc.
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-16
+!================================================================
+module dataset_config
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    !================================================================
+    ! DATASET PARAMETERS - CIFAR-10 Specific
+    !================================================================
+    integer, parameter, public :: train_samples = 50000
+    integer, parameter, public :: test_samples = 10000
+    integer, parameter, public :: num_classes = 10
+    integer, parameter, public :: INPUT_CHANNELS = 3
+    integer, parameter, public :: INPUT_HEIGHT = 32
+    integer, parameter, public :: INPUT_WIDTH = 32
+    integer, parameter, public :: input_size = 3072  ! 3*32*32
+
+    ! Data directory
+    character(len=*), parameter :: DATA_DIR = 'cifar10_data/'
+    character(len=*), parameter, public :: DATASET_NAME = 'CIFAR-10'
+
+    !================================================================
+    ! CNN ARCHITECTURE PARAMETERS
+    !================================================================
+    ! These can be customized per dataset if needed
+    integer, parameter, public :: CONV1_FILTERS = 32
+    integer, parameter, public :: CONV2_FILTERS = 64
+    integer, parameter, public :: CONV3_FILTERS = 128
+    integer, parameter, public :: KERNEL_SIZE = 3
+    integer, parameter, public :: PADDING = 1
+    integer, parameter, public :: STRIDE = 1
+    integer, parameter, public :: POOL_SIZE = 2
+    integer, parameter, public :: POOL_STRIDE = 2
+
+    !================================================================
+    ! GPU MEMORY FOR DATASET
+    !================================================================
+    real(4), device, allocatable, public :: gpu_train_data(:,:)     ! (50000, 3072)
+    integer, device, allocatable, public :: gpu_train_labels(:)     ! (50000)
+    real(4), device, allocatable, public :: gpu_test_data(:,:)      ! (10000, 3072)
+    integer, device, allocatable, public :: gpu_test_labels(:)      ! (10000)
+
+    logical :: data_loaded = .false.
+
+    ! Public interface
+    public :: load_dataset, is_data_loaded
+
+contains
+
+    !================================================================
+    ! Load CIFAR-10 from Python-preprocessed binary files
+    !================================================================
+    subroutine load_dataset()
+        real(4), allocatable :: train_images(:,:)  ! (50000, 3072)
+        real(4), allocatable :: test_images(:,:)   ! (10000, 3072)
+        integer, allocatable :: train_labels(:)    ! (50000)
+        integer, allocatable :: test_labels(:)     ! (10000)
+        integer :: stat
+
+        print *, "======================================================================"
+        print *, "Loading CIFAR-10 Dataset (v28 Baseline)"
+        print *, "======================================================================"
+
+        ! Allocate host arrays
+        allocate(train_images(train_samples, input_size))
+        allocate(train_labels(train_samples))
+        allocate(test_images(test_samples, input_size))
+        allocate(test_labels(test_samples))
+
+        ! Load training images
+        print *, "Loading training images..."
+        open(unit=10, file=DATA_DIR//'images_train.bin', form='unformatted', &
+             access='stream', status='old', iostat=stat)
+        if (stat /= 0) then
+            print *, "❌ ERROR: Cannot open images_train.bin"
+            print *, "Run: python prepare_cifar10.py"
+            stop
+        endif
+        read(10) train_images
+        close(10)
+
+        ! Load training labels
+        open(unit=10, file=DATA_DIR//'labels_train.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) train_labels
+        close(10)
+
+        ! Load test images
+        print *, "Loading test images..."
+        open(unit=10, file=DATA_DIR//'images_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) test_images
+        close(10)
+
+        ! Load test labels
+        open(unit=10, file=DATA_DIR//'labels_test.bin', form='unformatted', &
+             access='stream', status='old')
+        read(10) test_labels
+        close(10)
+
+        print *, "✅ Data loaded successfully!"
+        print *, "  Training samples:", train_samples
+        print *, "  Test samples:    ", test_samples
+        print *, "  Image size:      ", INPUT_HEIGHT, "x", INPUT_WIDTH, "x", INPUT_CHANNELS
+        print *, "  Classes:         ", num_classes
+
+        ! Verify data ranges
+        print *, ""
+        print *, "Data Statistics:"
+        print *, "  Train images - Min:", minval(train_images), " Max:", maxval(train_images)
+        print *, "  Train labels - Min:", minval(train_labels), " Max:", maxval(train_labels)
+        print *, "  Test images  - Min:", minval(test_images), " Max:", maxval(test_images)
+        print *, "  Test labels  - Min:", minval(test_labels), " Max:", maxval(test_labels)
+
+        ! Allocate GPU arrays
+        print *, ""
+        print *, "Transferring to GPU..."
+        allocate(gpu_train_data(train_samples, input_size))
+        allocate(gpu_train_labels(train_samples))
+        allocate(gpu_test_data(test_samples, input_size))
+        allocate(gpu_test_labels(test_samples))
+
+        ! Copy to GPU
+        gpu_train_data = train_images
+        gpu_train_labels = train_labels
+        gpu_test_data = test_images
+        gpu_test_labels = test_labels
+
+        ! Cleanup host arrays
+        deallocate(train_images, test_images, train_labels, test_labels)
+
+        data_loaded = .true.
+        print *, "✅ GPU transfer complete!"
+        print *, "======================================================================"
+        print *, ""
+    end subroutine load_dataset
+
+    !================================================================
+    ! Check if data is loaded
+    !================================================================
+    function is_data_loaded() result(loaded)
+        logical :: loaded
+        loaded = data_loaded
+    end function is_data_loaded
+
+end module dataset_config

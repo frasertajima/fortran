@@ -1,0 +1,53 @@
+program test_streaming_layout4
+    use cudafor
+    implicit none
+    
+    real(4), allocatable :: full_data(:,:)
+    real(4), allocatable :: raw_1d(:)
+    real(4), allocatable :: raw_batch(:,:)
+    integer :: i, j
+    
+    print *, "=========================================="
+    print *, "  1D Read + Reshape Test"
+    print *, "=========================================="
+    
+    ! Load full dataset
+    allocate(full_data(50000, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    print *, "Full data (50000, 3072):"
+    print *, "  Sample 0 features 0-4:", full_data(1, 1:5)
+    print *, "  Sample 1 features 0-4:", full_data(2, 1:5)
+    
+    ! Read as 1D and reshape
+    allocate(raw_1d(128 * 3072))
+    allocate(raw_batch(128, 3072))
+    
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) raw_1d
+    close(10)
+    
+    ! Reshape manually - each sample is 3072 contiguous floats
+    do i = 1, 128
+        do j = 1, 3072
+            raw_batch(i, j) = raw_1d((i-1)*3072 + j)
+        end do
+    end do
+    
+    print *, ""
+    print *, "1D read + manual reshape:"
+    print *, "  Sample 0 features 0-4:", raw_batch(1, 1:5)
+    print *, "  Sample 1 features 0-4:", raw_batch(2, 1:5)
+    
+    ! Compare
+    if (abs(full_data(1,1) - raw_batch(1,1)) < 1e-6 .and. &
+        abs(full_data(1,2) - raw_batch(1,2)) < 1e-6 .and. &
+        abs(full_data(2,1) - raw_batch(2,1)) < 1e-6) then
+        print *, "  MATCH!"
+    else
+        print *, "  MISMATCH"
+    endif
+    
+end program

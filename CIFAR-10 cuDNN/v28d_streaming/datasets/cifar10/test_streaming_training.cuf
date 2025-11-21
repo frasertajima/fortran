@@ -1,0 +1,182 @@
+! test_streaming_training.cuf - Validate streaming with actual CIFAR-10 training
+! This is a simplified test to verify streaming integration before modifying main code
+!
+! Compile: nvfortran -cuda -mp -O3 -o test_streaming_training test_streaming_training.cuf \
+!          ../../common/streaming_data_loader.cuf
+! Run: OMP_NUM_THREADS=2 ./test_streaming_training
+
+program test_streaming_training
+    use cudafor
+    use streaming_data_loader
+    implicit none
+
+    ! CIFAR-10 parameters
+    integer, parameter :: NUM_SAMPLES = 50000
+    integer, parameter :: FEATURE_SIZE = 3072  ! 32x32x3
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: NUM_CLASSES = 10
+    integer, parameter :: NUM_EPOCHS = 3
+    integer, parameter :: NUM_BATCHES = NUM_SAMPLES / BATCH_SIZE
+
+    ! Data paths
+    character(len=*), parameter :: DATA_DIR = "cifar10_data/"
+    character(len=256) :: data_file, label_file
+
+    ! Batch buffers (managed for GPU access)
+    real(4), managed, allocatable :: batch_data(:,:)
+    integer, managed, allocatable :: batch_labels(:)
+
+    ! Training state
+    integer :: epoch, batch, actual_size
+    integer :: total_samples_seen, correct
+    real(4) :: dummy_loss, accuracy
+    real(8) :: epoch_start, epoch_end, total_time
+    integer :: istat, i, j
+
+    ! GPU memory tracking
+    integer(8) :: gpu_free_start, gpu_free_end, gpu_total
+
+    print *, "=============================================="
+    print *, "  Streaming Training Integration Test"
+    print *, "=============================================="
+    print *, ""
+
+    ! Set up file paths
+    data_file = DATA_DIR // "images_train.bin"
+    label_file = DATA_DIR // "labels_train.bin"
+
+    ! Check GPU memory before
+    istat = cudaMemGetInfo(gpu_free_start, gpu_total)
+    print '(A, F6.2, A)', "GPU memory free (start): ", real(gpu_free_start)/(1024.0**3), " GB"
+
+    ! Allocate batch buffers
+    allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+    allocate(batch_labels(BATCH_SIZE))
+
+    ! Initialize streaming
+    call streaming_init(trim(data_file), trim(label_file), &
+                       int(NUM_SAMPLES, 8), FEATURE_SIZE, BATCH_SIZE)
+
+    if (.not. streaming_is_initialized()) then
+        print *, "ERROR: Streaming initialization failed"
+        print *, "Make sure cifar10_data/ exists with images_train.bin and labels_train.bin"
+        print *, "Run: python prepare_cifar10.py"
+        stop 1
+    endif
+
+    ! Set shuffle mode
+    call streaming_set_shuffle_mode(SHUFFLE_BLOCK, 50)
+
+    print *, ""
+    print *, "--- Starting Training Simulation ---"
+    print *, ""
+
+    total_time = 0.0
+
+    do epoch = 1, NUM_EPOCHS
+        print '(A, I2, A, I2)', "Epoch ", epoch, "/", NUM_EPOCHS
+
+        call cpu_time(epoch_start)
+
+        ! Start new epoch (reshuffles)
+        call streaming_start_epoch()
+
+        total_samples_seen = 0
+        correct = 0
+        batch = 0
+
+        ! Process all batches
+        do
+            call streaming_get_batch(batch_data, batch_labels, actual_size)
+
+            if (actual_size == 0) exit  ! End of epoch
+
+            batch = batch + 1
+            total_samples_seen = total_samples_seen + actual_size
+
+            ! Simulate GPU training work
+            call simulate_training_step(batch_data, batch_labels, actual_size, dummy_loss)
+
+            ! Count "correct" predictions (just for validation)
+            do i = 1, actual_size
+                if (batch_labels(i) >= 0 .and. batch_labels(i) < NUM_CLASSES) then
+                    correct = correct + 1
+                endif
+            end do
+
+            ! Progress every 100 batches
+            if (mod(batch, 100) == 0) then
+                print '(A, I4, A, I4, A, I6, A)', "  Batch ", batch, "/", NUM_BATCHES, &
+                      " (", total_samples_seen, " samples)"
+            endif
+        end do
+
+        call cpu_time(epoch_end)
+        total_time = total_time + (epoch_end - epoch_start)
+
+        ! Epoch summary
+        accuracy = 100.0 * real(correct) / real(total_samples_seen)
+        print '(A, I6, A, F6.2, A, F8.3, A)', "  Samples: ", total_samples_seen, &
+              ", Valid labels: ", accuracy, "%, Time: ", (epoch_end - epoch_start) * 1000.0, " ms"
+        print *, ""
+    end do
+
+    ! Final GPU memory check
+    istat = cudaMemGetInfo(gpu_free_end, gpu_total)
+
+    print *, "=============================================="
+    print *, "  Results"
+    print *, "=============================================="
+    print '(A, F8.2, A)', "Total time:           ", total_time * 1000.0, " ms"
+    print '(A, F8.4, A)', "Time per epoch:       ", total_time * 1000.0 / NUM_EPOCHS, " ms"
+    print '(A, F6.2, A)', "GPU free (start):     ", real(gpu_free_start)/(1024.0**3), " GB"
+    print '(A, F6.2, A)', "GPU free (end):       ", real(gpu_free_end)/(1024.0**3), " GB"
+    print '(A, F8.2, A)', "Memory change:        ", real(gpu_free_start - gpu_free_end)/(1024.0**2), " MB"
+    print *, ""
+
+    if (abs(gpu_free_start - gpu_free_end) < 100 * 1024 * 1024) then
+        print *, "MEMORY TEST: PASS (< 100 MB change)"
+    else
+        print *, "MEMORY TEST: WARNING (> 100 MB change)"
+    endif
+
+    if (total_samples_seen == NUM_SAMPLES * NUM_EPOCHS / NUM_EPOCHS) then
+        print *, "SAMPLE COUNT: PASS (all samples seen)"
+    else
+        print *, "SAMPLE COUNT: FAIL"
+    endif
+
+    print *, ""
+    print *, "Streaming integration test complete!"
+
+    ! Cleanup
+    call streaming_cleanup()
+    deallocate(batch_data, batch_labels)
+
+contains
+
+    subroutine simulate_training_step(data, labels, n, loss)
+        real(4), managed, intent(inout) :: data(:,:)
+        integer, managed, intent(in) :: labels(:)
+        integer, intent(in) :: n
+        real(4), intent(out) :: loss
+
+        integer :: i, j, iter, istat
+        real(4) :: sum_val
+
+        ! Simulate forward + backward with some GPU work
+        do iter = 1, 20
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, n
+                do i = 1, FEATURE_SIZE
+                    data(i, j) = data(i, j) * 1.0001 + 0.00001
+                end do
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+        loss = 0.5  ! Dummy loss
+
+    end subroutine simulate_training_step
+
+end program test_streaming_training

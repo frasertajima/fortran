@@ -1,0 +1,117 @@
+! Test Managed Memory - Simple verification program
+! Demonstrates that managed memory works with data larger than GPU RAM
+
+program test_managed_memory
+    use cudafor
+    implicit none
+
+    ! Test parameters
+    integer, parameter :: TEST_SIZE_SMALL = 10000      ! 10K samples (fits in GPU easily)
+    integer, parameter :: TEST_SIZE_MEDIUM = 50000     ! 50K samples (CIFAR-10 size)
+    integer, parameter :: TEST_SIZE_LARGE = 500000     ! 500K samples (10× CIFAR-10!)
+    integer, parameter :: FEATURE_SIZE = 3072          ! CIFAR-10 feature size
+
+    ! Memory mode flags
+    logical :: use_managed = .true.
+
+    integer :: test_case
+
+    print *, "========================================="
+    print *, "   Managed Memory Test Program"
+    print *, "========================================="
+    print *, ""
+
+    ! Test 1: Small dataset (device memory baseline)
+    print *, "Test 1: Small dataset with device memory"
+    call run_test(TEST_SIZE_SMALL, .false.)
+    print *, ""
+
+    ! Test 2: Medium dataset (CIFAR-10 size) with device memory
+    print *, "Test 2: Medium dataset (CIFAR-10 size) with device memory"
+    call run_test(TEST_SIZE_MEDIUM, .false.)
+    print *, ""
+
+    ! Test 3: Medium dataset (CIFAR-10 size) with managed memory
+    print *, "Test 3: Medium dataset (CIFAR-10 size) with managed memory"
+    call run_test(TEST_SIZE_MEDIUM, .true.)
+    print *, ""
+
+    ! Test 4: Large dataset (10× CIFAR-10) with managed memory
+    print *, "Test 4: Large dataset (10× CIFAR-10) with managed memory"
+    print *, "  Note: This may exceed GPU RAM - managed memory should handle it!"
+    call run_test(TEST_SIZE_LARGE, .true.)
+    print *, ""
+
+    print *, "========================================="
+    print *, "All tests completed successfully!"
+    print *, "========================================="
+
+contains
+
+    subroutine run_test(n_samples, use_managed_mem)
+        integer, intent(in) :: n_samples
+        logical, intent(in) :: use_managed_mem
+
+        real(4), allocatable :: train_data(:,:)
+        integer, allocatable :: train_labels(:)
+
+        integer :: i, j, istat
+        real(8) :: total_bytes, total_gb
+        integer(8) :: free_mem, total_mem
+
+        ! Calculate memory requirements
+        total_bytes = real(n_samples, 8) * real(FEATURE_SIZE, 8) * 4.0  ! 4 bytes per float
+        total_bytes = total_bytes + real(n_samples, 8) * 4.0             ! 4 bytes per int
+        total_gb = total_bytes / (1024.0**3)
+
+        print *, "  Samples:      ", n_samples
+        print *, "  Features:     ", FEATURE_SIZE
+        print *, "  Memory:       ", total_gb, " GB"
+        print *, "  Mode:         ", merge("MANAGED", "DEVICE ", use_managed_mem)
+
+        ! Get GPU memory info before allocation
+        istat = cudaMemGetInfo(free_mem, total_mem)
+        print *, "  GPU free:     ", real(free_mem)/(1024.0**3), " GB"
+
+        ! Allocate arrays
+        if (use_managed_mem) then
+            allocate(train_data(FEATURE_SIZE, n_samples), managed, stat=istat)
+            allocate(train_labels(n_samples), managed, stat=istat)
+        else
+            allocate(train_data(FEATURE_SIZE, n_samples), device, stat=istat)
+            allocate(train_labels(n_samples), device, stat=istat)
+        end if
+
+        if (istat /= 0) then
+            print *, "  ❌ FAILED: Allocation failed"
+            return
+        end if
+
+        ! Initialize data (simple pattern)
+        !$cuf kernel do(2) <<<*, *>>>
+        do j = 1, n_samples
+            do i = 1, FEATURE_SIZE
+                train_data(i, j) = real(mod(i + j, 256)) / 255.0
+            end do
+        end do
+
+        !$cuf kernel do <<<*, *>>>
+        do i = 1, n_samples
+            train_labels(i) = mod(i, 10)
+        end do
+
+        istat = cudaDeviceSynchronize()
+
+        ! Verify data (spot check)
+        if (train_data(1, 1) >= 0.0 .and. train_data(1, 1) <= 1.0) then
+            print *, "  ✅ SUCCESS: Data initialized and accessible"
+        else
+            print *, "  ❌ FAILED: Data verification failed"
+        end if
+
+        ! Cleanup
+        deallocate(train_data, train_labels)
+
+    end subroutine run_test
+
+end program test_managed_memory

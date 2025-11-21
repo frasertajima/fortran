@@ -1,0 +1,98 @@
+ 
+ 🚀 CIFAR-10 v28 CNN Training with cuDNN
+ ==========================================
+ 📊 Configuration:
+    Version: v28 (blocking synchronization)
+    Epochs:           15
+    Batch size:          128
+    Learning rate:   1.0000000E-03
+    Optimizer: Adam (beta1=0.9, beta2=0.999, decay=1e-4)
+    Activation: LeakyReLU(0.01)
+    LR Scheduler: StepLR (step_size=10, gamma=0.5)
+    Data Shuffle: Enabled (every epoch)
+ 
+ ✅ cuDNN and cuBLAS initialized
+ ✅ cuRAND initialized with seed:                       42
+ ======================================================================
+ Loading CIFAR-10 (v27 - Python Preprocessing)
+ ======================================================================
+ Loading training images...
+ Loading test images...
+ Data loaded successfully!
+   Training:           50000  samples
+   Test:               10000  samples
+ 
+ Data Statistics:
+   Train images - Min:    0.000000      Max:    1.000000    
+   Train labels - Min:            0  Max:            9
+   Test images - Min:    0.000000      Max:    1.000000    
+   Test labels - Min:            0  Max:            9
+ 
+ Transferring to GPU...
+ GPU transfer complete!
+ ======================================================================
+ 
+ ✅ GPU shuffle indices initialized (        50000 samples)
+ 🔧 Creating CIFAR-10 CNN model...
+ 
+ 🎲 Using cuRAND for weight initialization (seed=42)
+ 
+ 🔍 Conv1 (cuRAND): mean=  -1.1713636E-02  std=   0.2717248    
+    First 5 weights:  -0.1947500       0.4556749       0.3294869    
+    Expected: mean≈0.0, std≈   0.2721655    
+ ✅ Conv1 weights ready (export will convert to C-order)
+ 🔍 Conv1 AFTER transpose:  mean=  -1.1713636E-02  std=   0.2717248    
+    First 5 weights:  -0.1947500       0.4556749       0.3294869    
+ 
+ 🔍 Conv1 Weight Initialization Diagnostics:
+   Filter  1: mean= 0.0140 std= 0.3210 min=-0.9753 max= 0.6438
+   Filter  2: mean=-0.0192 std= 0.2912 min=-0.5979 max= 0.5952
+   Filter  3: mean=-0.0359 std= 0.3334 min=-0.7455 max= 0.7377
+   Filter  4: mean=-0.0782 std= 0.2410 min=-0.4985 max= 0.4236
+   Filter  5: mean=-0.0200 std= 0.1764 min=-0.3062 max= 0.4358
+   Filter 13 (OUTLIER ch13): mean= 0.0461 std= 0.2543 min=-0.8143 max= 0.4452
+   Expected std (He init):  0.2722
+ 
+ 🔍 FC1 Weight Initialization Diagnostics:
+   FC1 weights: mean =  0.000037
+   FC1 weights: std  =  0.027953
+   FC1 weights: min  = -0.132577
+   FC1 weights: max  =  0.138630
+   Expected std (Xavier):  0.027951
+    First 10 FC1 weights[1,1:10]:
+ -0.005863 -0.002175 -0.003336  0.016981 -0.021517 -0.053023  0.008998  0.017292  0.000483  0.005977
+ 
+ ✅ Dropout initialized: rate=0.5, FC1_reserve=                     8192 
+ bytes, FC2_reserve=                     4096 bytes
+ 
+📈 EPOCH  1/15
+ ------------------------------------------------------------
+ 🔍 FORWARD PASS: TRAINING mode (BatchNorm updates running stats)
+ 
+ 🔬 First Batch Activation Samples (first 10 values from batch 1):
+ 
+    Conv1 Ch 1:  -6.0833097E-02   7.5560659E-03  -6.7462847E-02  -0.1397184    
+   -7.9766534E-02  -0.1810491      -0.1361340       7.3657490E-02 
+  -1.8987937E-02  -6.2431138E-02
+    BN1 Ch 1:      1.541084        1.799506        1.516032        1.243000    
+     1.469540        1.086825        1.256545        2.049284     
+    1.699204        1.535046    
+ 
+    Conv1 Ch 13 (OUTLIER):  -7.7024207E-02  -0.5523581      -0.6287606     
+  -0.3588428      -0.4075581      -0.3395121      -0.5850171     
+  -0.6097256      -0.2513794      -0.5051968    
+    BN1 Ch 13 (OUTLIER):      1.479903      -0.3162398      -0.6049416     
+   0.4149960       0.2309155       0.4880407      -0.4396482     
+  -0.5330142       0.8210675      -0.1380314    
+ 
+    Conv1 Ch 21 (OUTLIER):  -0.1444916      -0.1729609      -0.2875704     
+  -0.1303769      -0.4259962      -0.3144365      -0.6039514     
+  -0.1440050      -0.4136428      -0.5056015    
+    BN1 Ch 21 (OUTLIER):      1.224964        1.117387       0.6843128     
+    1.278299       0.1612433       0.5827937      -0.5111952     
+    1.226803       0.2079233      -0.1395609    
+ 
+    ExpFIO/stdio: No such file or directory
+FIO-F-/OPEN/unit=77/error code returned by host stdio - 2.
+ File name = datasets/cifar10/saved_models/cifar10/debug_conv1.bin                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+ In source file ../../common/model_export.cuf, at line number 426

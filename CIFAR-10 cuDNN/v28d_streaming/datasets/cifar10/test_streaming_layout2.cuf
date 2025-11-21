@@ -1,0 +1,55 @@
+program test_streaming_layout2
+    use cudafor
+    use streaming_data_loader
+    implicit none
+    
+    real(4), allocatable :: full_data(:,:)
+    real(4), managed, allocatable :: stream_data(:,:)
+    integer, managed, allocatable :: stream_labels(:)
+    integer :: actual_size, i, j, mismatches
+    real(4) :: diff
+    
+    print *, "=========================================="
+    print *, "  Full Feature Comparison Test"
+    print *, "=========================================="
+    
+    ! Load full dataset
+    allocate(full_data(50000, 3072))
+    open(unit=10, file='cifar10_data/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10) full_data
+    close(10)
+    
+    ! Initialize streaming  
+    allocate(stream_data(3072, 128))
+    allocate(stream_labels(128))
+    
+    call streaming_init('cifar10_data/images_train.bin', 'cifar10_data/labels_train.bin', &
+                        50000_8, 3072, 128)
+    call streaming_set_shuffle_mode(SHUFFLE_NONE, 1)
+    call streaming_start_epoch()
+    call streaming_get_batch(stream_data, stream_labels, actual_size)
+    
+    print *, ""
+    print *, "Sample 0 comparison (first 10 features):"
+    print *, "  Full:  ", full_data(1, 1:10)
+    print *, "  Stream:", stream_data(1:10, 1)
+    
+    ! Count mismatches for sample 0
+    mismatches = 0
+    do j = 1, 3072
+        diff = abs(full_data(1, j) - stream_data(j, 1))
+        if (diff > 1e-6) mismatches = mismatches + 1
+    end do
+    print *, "  Feature mismatches for sample 0:", mismatches, "/ 3072"
+    
+    ! Check if data is transposed somehow
+    print *, ""
+    print *, "Testing if columns/rows are swapped..."
+    print *, "  full_data(1, 1:5) =", full_data(1, 1:5)
+    print *, "  full_data(1:5, 1) =", full_data(1:5, 1)
+    print *, "  stream_data(1:5, 1) =", stream_data(1:5, 1)
+    print *, "  stream_data(1, 1:5) =", stream_data(1, 1:5)
+    
+    call streaming_cleanup()
+    
+end program

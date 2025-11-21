@@ -1,0 +1,48 @@
+program test_raw_read
+    use cudafor
+    implicit none
+    
+    real(4), allocatable :: batch_data(:,:)
+    real(4), allocatable :: batch_1d(:)
+    integer :: i, j
+    
+    print *, "=========================================="
+    print *, "  Raw Read from Sample-Major File"
+    print *, "=========================================="
+    
+    ! Expected: sample 0 features are at positions 0-3071, sample 1 at 3072-6143, etc.
+    
+    ! Method 1: Read into (batch, features) directly
+    print *, ""
+    print *, "Method 1: Read (128, 3072) directly"
+    allocate(batch_data(128, 3072))
+    open(unit=10, file='cifar10_data_streaming/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) batch_data
+    close(10)
+    print *, "  Sample 0 features 0-4:", batch_data(1, 1:5)
+    print *, "  Sample 1 features 0-4:", batch_data(2, 1:5)
+    deallocate(batch_data)
+    
+    ! Method 2: Read into (features, batch) directly - what streaming uses
+    print *, ""
+    print *, "Method 2: Read (3072, 128) directly - streaming buffer layout"
+    allocate(batch_data(3072, 128))
+    open(unit=10, file='cifar10_data_streaming/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) batch_data
+    close(10)
+    print *, "  batch_data(1:5, 1) =", batch_data(1:5, 1)
+    print *, "  batch_data(1:5, 2) =", batch_data(1:5, 2)
+    deallocate(batch_data)
+    
+    ! Method 3: Read 1D and manually index
+    print *, ""
+    print *, "Method 3: Read 1D array"
+    allocate(batch_1d(128 * 3072))
+    open(unit=10, file='cifar10_data_streaming/images_train.bin', form='unformatted', access='stream', status='old')
+    read(10, pos=1) batch_1d
+    close(10)
+    print *, "  First 5 values (sample 0 features 0-4):", batch_1d(1:5)
+    print *, "  Values 3073-3077 (sample 1 features 0-4):", batch_1d(3073:3077)
+    deallocate(batch_1d)
+    
+end program
