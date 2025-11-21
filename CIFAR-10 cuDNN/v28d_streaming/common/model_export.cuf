@@ -1,0 +1,434 @@
+!================================================================
+! Model Export Module - v28 Baseline
+!================================================================
+! Saves trained CNN model weights to binary files for inference.
+!
+! Usage:
+!   use model_export
+!   call export_model(model, "saved_models/cifar10/", accuracy, epoch)
+!
+! Output files:
+!   model_metadata.txt   - Human readable info
+!   conv1_weights.bin    - (32, 3, 3, 3)
+!   conv1_bias.bin       - (32)
+!   ... [all layers]
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-17
+!================================================================
+
+module model_export
+    use cudafor
+    use iso_c_binding
+    implicit none
+
+    private
+    public :: export_model_generic, create_export_directory, export_debug_outputs, export_activation_debug
+
+contains
+
+    !================================================================
+    ! Create export directory and metadata file
+    !================================================================
+    subroutine create_export_directory(export_dir, dataset_name, &
+                                       accuracy, epoch, timestamp)
+        character(len=*), intent(in) :: export_dir, dataset_name
+        real(4), intent(in) :: accuracy
+        integer, intent(in) :: epoch
+        character(len=*), intent(in), optional :: timestamp
+
+        character(len=256) :: metadata_file, cmd
+        integer :: unit_num
+
+        ! Create directory (mkdir -p)
+        cmd = "mkdir -p " // trim(export_dir)
+        call system(trim(cmd))
+
+        ! Write metadata
+        metadata_file = trim(export_dir) // "model_metadata.txt"
+        open(newunit=unit_num, file=metadata_file, status='replace')
+
+        write(unit_num, '(A)') "======================================================================"
+        write(unit_num, '(A)') "v28 Baseline - Trained Model Export"
+        write(unit_num, '(A)') "======================================================================"
+        write(unit_num, '(A,A)') "Dataset: ", trim(dataset_name)
+        write(unit_num, '(A,F8.4,A)') "Test Accuracy: ", accuracy, "%"
+        write(unit_num, '(A,I0)') "Epochs Trained: ", epoch
+        if (present(timestamp)) then
+            write(unit_num, '(A,A)') "Export Date: ", trim(timestamp)
+        endif
+        write(unit_num, '(A)') ""
+        write(unit_num, '(A)') "Files Exported:"
+        write(unit_num, '(A)') "  Convolutional Layers:"
+        write(unit_num, '(A)') "    - conv1_weights.bin, conv1_bias.bin"
+        write(unit_num, '(A)') "    - conv2_weights.bin, conv2_bias.bin"
+        write(unit_num, '(A)') "    - conv3_weights.bin, conv3_bias.bin"
+        write(unit_num, '(A)') "  Fully Connected Layers:"
+        write(unit_num, '(A)') "    - fc1_weights.bin, fc1_bias.bin"
+        write(unit_num, '(A)') "    - fc2_weights.bin, fc2_bias.bin"
+        write(unit_num, '(A)') "    - fc3_weights.bin, fc3_bias.bin"
+        write(unit_num, '(A)') "  BatchNorm Layers (Conv blocks only):"
+        write(unit_num, '(A)') "    - bn[1-3]_scale.bin, bn[1-3]_bias.bin"
+        write(unit_num, '(A)') "    - bn[1-3]_running_mean.bin, bn[1-3]_running_var.bin"
+        write(unit_num, '(A)') ""
+        write(unit_num, '(A)') "Load with: v28_baseline/inference/model_loader.py"
+        write(unit_num, '(A)') "======================================================================"
+
+        close(unit_num)
+
+        print *, "✅ Created export directory: ", trim(export_dir)
+        print *, "✅ Wrote metadata file: ", trim(metadata_file)
+    end subroutine create_export_directory
+
+    !================================================================
+    ! Export single 4D array (convolutional weights)
+    ! Export as-is in Fortran F-order
+    ! Python will load with order='F' to preserve the memory layout
+    !================================================================
+    subroutine export_4d_array(array, filename)
+        real(4), device, intent(in) :: array(:,:,:,:)
+        character(len=*), intent(in) :: filename
+
+        real(4), allocatable :: host_array(:,:,:,:)
+        integer :: dims(4)
+
+        dims = shape(array)
+        allocate(host_array(dims(1), dims(2), dims(3), dims(4)))
+
+        ! Copy from device to host
+        host_array = array
+
+        ! Write to binary file in F-order (as-is)
+        ! Python will handle the conversion
+        open(unit=99, file=filename, form='unformatted', access='stream', status='replace')
+        write(99) host_array
+        close(99)
+
+        ! ALSO write to text file for debugging (first 20 values)
+        block
+            character(len=512) :: text_filename
+            integer :: i, j, k, l, count
+            text_filename = trim(filename) // '.txt'
+            open(unit=98, file=text_filename, status='replace')
+            write(98, '(A)') '# Conv weights in F-order: (K,C,H,W)'
+            write(98, '(A,4I5)') '# Shape:', dims
+            write(98, '(A)') '# Format: K C H W value'
+            write(98, '(A)') '# First 20 values:'
+            count = 0
+            do i = 1, dims(1)
+                do j = 1, dims(2)
+                    do k = 1, dims(3)
+                        do l = 1, dims(4)
+                            if (count < 20) then
+                                write(98, '(4I4,F12.6)') i, j, k, l, host_array(i,j,k,l)
+                                count = count + 1
+                            end if
+                        end do
+                    end do
+                end do
+            end do
+            close(98)
+        end block
+
+        deallocate(host_array)
+    end subroutine export_4d_array
+
+    !================================================================
+    ! Export single 2D array (FC weights)
+    ! Export as-is in Fortran column-major order
+    ! Python will reshape with order='F' to handle the conversion
+    !================================================================
+    subroutine export_2d_array(array, filename)
+        real(4), device, intent(in) :: array(:,:)
+        character(len=*), intent(in) :: filename
+
+        real(4), allocatable :: host_array(:,:)
+        integer :: dims(2)
+
+        dims = shape(array)
+        allocate(host_array(dims(1), dims(2)))
+
+        ! Copy from device to host
+        host_array = array
+
+        ! Write to binary file in F-order (as-is)
+        ! Python will handle the conversion
+        open(unit=99, file=filename, form='unformatted', access='stream', status='replace')
+        write(99) host_array
+        close(99)
+
+        deallocate(host_array)
+    end subroutine export_2d_array
+
+    !================================================================
+    ! Export single 1D array (bias, BatchNorm params)
+    !================================================================
+    subroutine export_1d_array(array, filename)
+        real(4), device, intent(in) :: array(:)
+        character(len=*), intent(in) :: filename
+
+        real(4), allocatable :: host_array(:)
+        integer :: n
+
+        n = size(array)
+        allocate(host_array(n))
+
+        ! Copy from device to host
+        host_array = array
+
+        ! Write to binary file
+        open(unit=99, file=filename, form='unformatted', access='stream', status='replace')
+        write(99) host_array
+        close(99)
+
+        deallocate(host_array)
+    end subroutine export_1d_array
+
+    !================================================================
+    ! Export complete CNN model
+    !
+    ! This is a generic interface - you'll need to adapt it
+    ! to your specific model structure
+    !================================================================
+    subroutine export_model_generic(export_dir, &
+                                    conv1_w, conv1_b, &
+                                    conv2_w, conv2_b, &
+                                    conv3_w, conv3_b, &
+                                    fc1_w, fc1_b, &
+                                    fc2_w, fc2_b, &
+                                    fc3_w, fc3_b, &
+                                    bn1_s, bn1_b, bn1_rm, bn1_rv, &
+                                    bn2_s, bn2_b, bn2_rm, bn2_rv, &
+                                    bn3_s, bn3_b, bn3_rm, bn3_rv)
+
+        character(len=*), intent(in) :: export_dir
+
+        ! Convolutional layers
+        real(4), device, intent(in) :: conv1_w(:,:,:,:), conv1_b(:)
+        real(4), device, intent(in) :: conv2_w(:,:,:,:), conv2_b(:)
+        real(4), device, intent(in) :: conv3_w(:,:,:,:), conv3_b(:)
+
+        ! Fully connected layers
+        real(4), device, intent(in) :: fc1_w(:,:), fc1_b(:)
+        real(4), device, intent(in) :: fc2_w(:,:), fc2_b(:)
+        real(4), device, intent(in) :: fc3_w(:,:), fc3_b(:)
+
+        ! BatchNorm layers - only 3 (after conv blocks, NOT after FC layers)
+        real(4), device, intent(in) :: bn1_s(:), bn1_b(:), bn1_rm(:), bn1_rv(:)
+        real(4), device, intent(in) :: bn2_s(:), bn2_b(:), bn2_rm(:), bn2_rv(:)
+        real(4), device, intent(in) :: bn3_s(:), bn3_b(:), bn3_rm(:), bn3_rv(:)
+
+        character(len=256) :: filepath
+
+        print *, ""
+        print *, "======================================================================"
+        print *, "Exporting Model Weights to: ", trim(export_dir)
+        print *, "======================================================================"
+
+        ! Export convolutional layers
+        print *, "Exporting Conv1..."
+        filepath = trim(export_dir) // "conv1_weights.bin"
+        call export_4d_array(conv1_w, filepath)
+        filepath = trim(export_dir) // "conv1_bias.bin"
+        call export_1d_array(conv1_b, filepath)
+
+        print *, "Exporting Conv2..."
+        filepath = trim(export_dir) // "conv2_weights.bin"
+        call export_4d_array(conv2_w, filepath)
+        filepath = trim(export_dir) // "conv2_bias.bin"
+        call export_1d_array(conv2_b, filepath)
+
+        print *, "Exporting Conv3..."
+        filepath = trim(export_dir) // "conv3_weights.bin"
+        call export_4d_array(conv3_w, filepath)
+        filepath = trim(export_dir) // "conv3_bias.bin"
+        call export_1d_array(conv3_b, filepath)
+
+        ! Export fully connected layers
+        print *, "Exporting FC1..."
+        filepath = trim(export_dir) // "fc1_weights.bin"
+        call export_2d_array(fc1_w, filepath)
+        filepath = trim(export_dir) // "fc1_bias.bin"
+        call export_1d_array(fc1_b, filepath)
+
+        print *, "Exporting FC2..."
+        filepath = trim(export_dir) // "fc2_weights.bin"
+        call export_2d_array(fc2_w, filepath)
+        filepath = trim(export_dir) // "fc2_bias.bin"
+        call export_1d_array(fc2_b, filepath)
+
+        print *, "Exporting FC3..."
+        filepath = trim(export_dir) // "fc3_weights.bin"
+        call export_2d_array(fc3_w, filepath)
+        filepath = trim(export_dir) // "fc3_bias.bin"
+        call export_1d_array(fc3_b, filepath)
+
+        ! Export BatchNorm layers
+        print *, "Exporting BatchNorm layers..."
+
+        ! BN1
+        filepath = trim(export_dir) // "bn1_scale.bin"
+        call export_1d_array(bn1_s, filepath)
+        filepath = trim(export_dir) // "bn1_bias.bin"
+        call export_1d_array(bn1_b, filepath)
+        filepath = trim(export_dir) // "bn1_running_mean.bin"
+        call export_1d_array(bn1_rm, filepath)
+        filepath = trim(export_dir) // "bn1_running_var.bin"
+        call export_1d_array(bn1_rv, filepath)
+
+        ! BN2
+        filepath = trim(export_dir) // "bn2_scale.bin"
+        call export_1d_array(bn2_s, filepath)
+        filepath = trim(export_dir) // "bn2_bias.bin"
+        call export_1d_array(bn2_b, filepath)
+        filepath = trim(export_dir) // "bn2_running_mean.bin"
+        call export_1d_array(bn2_rm, filepath)
+        filepath = trim(export_dir) // "bn2_running_var.bin"
+        call export_1d_array(bn2_rv, filepath)
+
+        ! BN3
+        filepath = trim(export_dir) // "bn3_scale.bin"
+        call export_1d_array(bn3_s, filepath)
+        filepath = trim(export_dir) // "bn3_bias.bin"
+        call export_1d_array(bn3_b, filepath)
+        filepath = trim(export_dir) // "bn3_running_mean.bin"
+        call export_1d_array(bn3_rm, filepath)
+        filepath = trim(export_dir) // "bn3_running_var.bin"
+        call export_1d_array(bn3_rv, filepath)
+
+        print *, ""
+        print *, "✅ Model export complete!"
+        print *, "======================================================================"
+        print *, ""
+
+    end subroutine export_model_generic
+
+    !================================================================
+    ! DEBUG: Export intermediate layer outputs for comparison
+    ! Call this after running inference on the first test image
+    !================================================================
+    subroutine export_debug_outputs(export_dir, conv1_out, bn1_out, pool1_out, &
+                                     conv2_out, bn2_out, pool2_out, &
+                                     conv3_out, bn3_out, pool3_out, &
+                                     flatten, fc1_out, fc2_out, fc3_out)
+        character(len=*), intent(in) :: export_dir
+        real(4), device, intent(in) :: conv1_out(:,:,:,:)  ! (W,H,C,N)
+        real(4), device, intent(in) :: bn1_out(:,:,:,:)
+        real(4), device, intent(in) :: pool1_out(:,:,:,:)
+        real(4), device, intent(in) :: conv2_out(:,:,:,:)
+        real(4), device, intent(in) :: bn2_out(:,:,:,:)
+        real(4), device, intent(in) :: pool2_out(:,:,:,:)
+        real(4), device, intent(in) :: conv3_out(:,:,:,:)
+        real(4), device, intent(in) :: bn3_out(:,:,:,:)
+        real(4), device, intent(in) :: pool3_out(:,:,:,:)
+        real(4), device, intent(in) :: flatten(:,:)  ! (N, features)
+        real(4), device, intent(in) :: fc1_out(:,:)
+        real(4), device, intent(in) :: fc2_out(:,:)
+        real(4), device, intent(in) :: fc3_out(:,:)
+        
+        character(len=512) :: filepath
+        real(4), allocatable :: host_array_4d(:,:,:,:)
+        real(4), allocatable :: host_array_2d(:,:)
+        integer :: dims(4), dims2(2)
+        
+        print *, ""
+        print *, "======================================================================"
+        print *, "🔍 DEBUG: Exporting intermediate layer outputs"
+        print *, "======================================================================"
+        
+        ! Export first sample only (batch index 1)
+        ! Conv1 output
+        dims = shape(conv1_out)
+        allocate(host_array_4d(dims(1), dims(2), dims(3), 1))
+        host_array_4d(:,:,:,1) = conv1_out(:,:,:,1)  ! Copy from device to host
+        filepath = trim(export_dir) // "debug_conv1_out.bin"
+        open(unit=99, file=filepath, form='unformatted', access='stream', status='replace')
+        write(99) host_array_4d
+        close(99)
+        deallocate(host_array_4d)
+        
+        ! Pool3 output (most important - this feeds FC1)
+        dims = shape(pool3_out)
+        allocate(host_array_4d(dims(1), dims(2), dims(3), 1))
+        host_array_4d(:,:,:,1) = pool3_out(:,:,:,1)  ! Copy from device to host
+        filepath = trim(export_dir) // "debug_pool3_out.bin"
+        open(unit=99, file=filepath, form='unformatted', access='stream', status='replace')
+        write(99) host_array_4d
+        close(99)
+        deallocate(host_array_4d)
+        
+        ! Flatten output
+        dims2 = shape(flatten)
+        allocate(host_array_2d(1, dims2(2)))
+        host_array_2d(1,:) = flatten(1,:)  ! Copy from device to host
+        filepath = trim(export_dir) // "debug_flatten_out.bin"
+        open(unit=99, file=filepath, form='unformatted', access='stream', status='replace')
+        write(99) host_array_2d
+        close(99)
+        deallocate(host_array_2d)
+        
+        ! FC1 output
+        dims2 = shape(fc1_out)
+        allocate(host_array_2d(1, dims2(2)))
+        host_array_2d(1,:) = fc1_out(1,:)  ! Copy from device to host
+        filepath = trim(export_dir) // "debug_fc1_out.bin"
+        open(unit=99, file=filepath, form='unformatted', access='stream', status='replace')
+        write(99) host_array_2d
+        close(99)
+        deallocate(host_array_2d)
+        
+        ! FC3 output (final logits)
+        dims2 = shape(fc3_out)
+        allocate(host_array_2d(1, dims2(2)))
+        host_array_2d(1,:) = fc3_out(1,:)  ! Copy from device to host
+        filepath = trim(export_dir) // "debug_fc3_out.bin"
+        open(unit=99, file=filepath, form='unformatted', access='stream', status='replace')
+        write(99) host_array_2d
+        close(99)
+        deallocate(host_array_2d)
+        
+        print *, "✅ Debug outputs exported!"
+        print *, "======================================================================"
+        print *, ""
+        
+    end subroutine export_debug_outputs
+
+    !================================================================
+    ! DEBUG: Export Intermediate Activations (Golden Vectors)
+    ! Call this right after computing each layer for the FIRST image only.
+    !================================================================
+    subroutine export_activation_debug(layer_name, activation_array, export_dir)
+        character(len=*), intent(in) :: layer_name
+        real(4), device, intent(in) :: activation_array(:,:,:,:)  ! (W,H,C,N)
+        character(len=*), intent(in), optional :: export_dir
+        
+        real(4), allocatable :: host_data(:,:,:,:)
+        character(len=512) :: filename
+        character(len=256) :: dir_path
+        integer :: dims(4)
+        
+        ! Set directory
+        if (present(export_dir)) then
+            dir_path = trim(export_dir)
+        else
+            dir_path = "./"
+        endif
+        
+        ! Get dimensions
+        dims = shape(activation_array)
+        
+        ! Allocate and copy first image only
+        allocate(host_data(dims(1), dims(2), dims(3), 1))
+        host_data(:,:,:,1) = activation_array(:,:,:,1)
+        
+        ! Save raw binary
+        filename = trim(dir_path) // "debug_" // trim(layer_name) // ".bin"
+        open(unit=77, file=filename, form='unformatted', access='stream', status='replace')
+        write(77) host_data
+        close(77)
+        
+        deallocate(host_data)
+        print *, "📸 Debug Exported: ", trim(filename)
+    end subroutine export_activation_debug
+
+end module model_export

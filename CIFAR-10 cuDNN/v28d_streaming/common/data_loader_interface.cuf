@@ -1,0 +1,271 @@
+!================================================================
+! Unified Data Loader Interface - v28d
+!================================================================
+! Provides a single interface for both:
+!   - Full RAM mode (managed memory, loads entire dataset)
+!   - Streaming mode (double-buffered, streams from disk)
+!
+! Usage:
+!   1. call data_loader_init(data_file, label_file, n_samples, feat_size, batch_sz, use_streaming)
+!   2. call data_loader_start_epoch()
+!   3. call data_loader_get_batch(batch_data, batch_labels, actual_size)
+!   4. call data_loader_cleanup()
+!
+! The interface automatically handles:
+!   - Mode selection based on use_streaming flag
+!   - Memory allocation (managed or streaming buffers)
+!   - Batch extraction (GPU shuffle or disk streaming)
+!   - Epoch shuffling
+!
+! Author: v28d Streaming Team
+! Date: 2025-11-21
+!================================================================
+module data_loader_interface
+    use cudafor
+    use streaming_data_loader
+    implicit none
+
+    !----------------------------------------------------------------
+    ! Configuration
+    !----------------------------------------------------------------
+    logical, private :: streaming_enabled = .false.
+    logical, private :: interface_initialized = .false.
+
+    ! Dataset info (for both modes)
+    integer(8), private :: total_samples
+    integer, private :: feature_size
+    integer, private :: batch_size
+    integer, private :: num_batches
+    character(len=512), private :: data_file_path
+    character(len=512), private :: label_file_path
+
+    ! Full RAM mode data (managed memory)
+    real(4), managed, allocatable, private :: full_data(:,:)
+    integer, managed, allocatable, private :: full_labels(:)
+    integer, allocatable, private :: shuffle_indices(:)
+    integer, private :: current_batch
+
+    ! Batch buffers (used in both modes)
+    real(4), managed, allocatable, private :: batch_buffer_data(:,:)
+    integer, managed, allocatable, private :: batch_buffer_labels(:)
+
+    public :: data_loader_init
+    public :: data_loader_start_epoch
+    public :: data_loader_get_batch
+    public :: data_loader_cleanup
+    public :: data_loader_get_num_batches
+    public :: data_loader_is_streaming
+
+contains
+
+    !================================================================
+    ! Initialize data loader
+    !================================================================
+    subroutine data_loader_init(data_file, label_file, n_samples, feat_size, batch_sz, use_streaming)
+        character(len=*), intent(in) :: data_file, label_file
+        integer(8), intent(in) :: n_samples
+        integer, intent(in) :: feat_size, batch_sz
+        logical, intent(in) :: use_streaming
+
+        integer :: istat
+        real :: data_size_gb
+
+        ! Store configuration
+        data_file_path = data_file
+        label_file_path = label_file
+        total_samples = n_samples
+        feature_size = feat_size
+        batch_size = batch_sz
+        streaming_enabled = use_streaming
+        num_batches = int((n_samples + batch_sz - 1) / batch_sz)
+
+        data_size_gb = real(n_samples) * real(feat_size) * 4.0 / (1024.0**3)
+
+        print *, ""
+        print *, "=========================================="
+        print *, "  Data Loader Interface Initialized"
+        print *, "=========================================="
+        print '(A,A)', "  Data file: ", trim(data_file)
+        print '(A,I12)', "  Samples:   ", total_samples
+        print '(A,I12)', "  Features:  ", feature_size
+        print '(A,I12)', "  Batch size:", batch_size
+        print '(A,I12)', "  Batches:   ", num_batches
+        print '(A,F8.2,A)', "  Data size: ", data_size_gb, " GB"
+
+        if (streaming_enabled) then
+            print *, "  Mode:       STREAMING (disk-based)"
+            print *, "=========================================="
+
+            ! Initialize streaming loader
+            call streaming_init(data_file, label_file, n_samples, feat_size, batch_sz)
+            call streaming_set_shuffle_mode(SHUFFLE_BLOCK, 50)
+
+            ! Allocate batch buffers for output
+            allocate(batch_buffer_data(feat_size, batch_sz), stat=istat)
+            allocate(batch_buffer_labels(batch_sz), stat=istat)
+        else
+            print *, "  Mode:       FULL RAM (managed memory)"
+            print *, "=========================================="
+
+            ! Allocate and load full dataset into managed memory
+            print *, ""
+            print *, "Loading full dataset into managed memory..."
+
+            allocate(full_data(int(n_samples), feat_size), stat=istat)
+            if (istat /= 0) then
+                print *, "ERROR: Failed to allocate data array"
+                return
+            endif
+
+            allocate(full_labels(int(n_samples)), stat=istat)
+            if (istat /= 0) then
+                print *, "ERROR: Failed to allocate labels array"
+                return
+            endif
+
+            allocate(shuffle_indices(int(n_samples)), stat=istat)
+            allocate(batch_buffer_data(feat_size, batch_sz), stat=istat)
+            allocate(batch_buffer_labels(batch_sz), stat=istat)
+
+            ! Load data from files
+            open(unit=20, file=trim(data_file), form='unformatted', &
+                 access='stream', status='old', iostat=istat)
+            if (istat /= 0) then
+                print *, "ERROR: Cannot open data file: ", trim(data_file)
+                return
+            endif
+            read(20) full_data
+            close(20)
+
+            open(unit=20, file=trim(label_file), form='unformatted', &
+                 access='stream', status='old', iostat=istat)
+            if (istat /= 0) then
+                print *, "ERROR: Cannot open label file: ", trim(label_file)
+                return
+            endif
+            read(20) full_labels
+            close(20)
+
+            print '(A,F8.2,A)', "  Loaded ", data_size_gb, " GB into managed memory"
+        endif
+
+        interface_initialized = .true.
+        print *, ""
+
+    end subroutine data_loader_init
+
+    !================================================================
+    ! Start a new epoch (shuffle data)
+    !================================================================
+    subroutine data_loader_start_epoch()
+        integer :: i, j, temp
+        real :: r
+
+        if (.not. interface_initialized) then
+            print *, "ERROR: Data loader not initialized"
+            return
+        endif
+
+        if (streaming_enabled) then
+            call streaming_start_epoch()
+        else
+            ! Fisher-Yates shuffle for full RAM mode
+            do i = 1, int(total_samples)
+                shuffle_indices(i) = i
+            end do
+
+            do i = int(total_samples), 2, -1
+                call random_number(r)
+                j = 1 + int(r * real(i))
+                temp = shuffle_indices(i)
+                shuffle_indices(i) = shuffle_indices(j)
+                shuffle_indices(j) = temp
+            end do
+
+            current_batch = 0
+        endif
+
+    end subroutine data_loader_start_epoch
+
+    !================================================================
+    ! Get next batch
+    !================================================================
+    subroutine data_loader_get_batch(batch_data, batch_labels, actual_size)
+        real(4), managed, intent(out) :: batch_data(:,:)
+        integer, managed, intent(out) :: batch_labels(:)
+        integer, intent(out) :: actual_size
+
+        integer :: start_idx, end_idx, i, idx
+        integer(8) :: samples_before
+
+        if (.not. interface_initialized) then
+            print *, "ERROR: Data loader not initialized"
+            actual_size = 0
+            return
+        endif
+
+        if (streaming_enabled) then
+            call streaming_get_batch(batch_data, batch_labels, actual_size)
+        else
+            current_batch = current_batch + 1
+
+            if (current_batch > num_batches) then
+                actual_size = 0
+                return
+            endif
+
+            ! Calculate batch range
+            start_idx = (current_batch - 1) * batch_size + 1
+            end_idx = min(current_batch * batch_size, int(total_samples))
+            actual_size = end_idx - start_idx + 1
+
+            ! Extract shuffled batch
+            do i = 1, actual_size
+                idx = shuffle_indices(start_idx + i - 1)
+                batch_data(:, i) = full_data(idx, :)
+                batch_labels(i) = full_labels(idx)
+            end do
+        endif
+
+    end subroutine data_loader_get_batch
+
+    !================================================================
+    ! Get number of batches
+    !================================================================
+    function data_loader_get_num_batches() result(n)
+        integer :: n
+        n = num_batches
+    end function data_loader_get_num_batches
+
+    !================================================================
+    ! Check if streaming mode is enabled
+    !================================================================
+    function data_loader_is_streaming() result(is_streaming)
+        logical :: is_streaming
+        is_streaming = streaming_enabled
+    end function data_loader_is_streaming
+
+    !================================================================
+    ! Cleanup
+    !================================================================
+    subroutine data_loader_cleanup()
+
+        if (.not. interface_initialized) return
+
+        if (streaming_enabled) then
+            call streaming_cleanup()
+        else
+            if (allocated(full_data)) deallocate(full_data)
+            if (allocated(full_labels)) deallocate(full_labels)
+            if (allocated(shuffle_indices)) deallocate(shuffle_indices)
+        endif
+
+        if (allocated(batch_buffer_data)) deallocate(batch_buffer_data)
+        if (allocated(batch_buffer_labels)) deallocate(batch_buffer_labels)
+
+        interface_initialized = .false.
+        print *, "Data loader cleaned up"
+
+    end subroutine data_loader_cleanup
+
+end module data_loader_interface

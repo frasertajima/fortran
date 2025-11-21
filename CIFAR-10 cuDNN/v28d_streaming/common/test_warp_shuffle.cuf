@@ -1,0 +1,237 @@
+!================================================================
+! Test Program for Warp Shuffle Module
+!================================================================
+! Simple test to verify __shfl_down_sync() works correctly
+!
+! Compile: nvfortran -cuda -O3 test_warp_shuffle.cuf warp_shuffle.cuf -o test_warp_shuffle
+! Run: ./test_warp_shuffle
+!
+! Expected output:
+!   Each warp should compute correct sum/max/min
+!   Performance comparison: warp shuffle vs atomic operations
+!================================================================
+
+module test_kernels
+    use cudafor
+    use warp_shuffle
+    implicit none
+
+contains
+
+    !================================================================
+    ! Test kernel: warp-level sum reduction
+    !================================================================
+    attributes(global) subroutine test_warp_sum_kernel(input, output, n)
+        real(4), device :: input(:)
+        real(4), device :: output(:)
+        integer, value :: n
+
+        integer :: tid, warp_id, lane_id
+        real(4) :: val, warp_sum
+
+        tid = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        lane_id = mod(tid - 1, WARP_SIZE)
+
+        ! Each thread loads one value
+        if (tid <= n) then
+            val = input(tid)
+        else
+            val = 0.0
+        endif
+
+        ! Warp-level reduction
+        warp_sum = warp_reduce_sum_real(val)
+
+        ! Lane 0 of each warp writes the result
+        if (lane_id == 0 .and. warp_id <= (n + WARP_SIZE - 1) / WARP_SIZE) then
+            output(warp_id) = warp_sum
+        endif
+    end subroutine test_warp_sum_kernel
+
+    !================================================================
+    ! Test kernel: warp-level max reduction
+    !================================================================
+    attributes(global) subroutine test_warp_max_kernel(input, output, n)
+        real(4), device :: input(:)
+        real(4), device :: output(:)
+        integer, value :: n
+
+        integer :: tid, warp_id, lane_id
+        real(4) :: val, warp_max
+
+        tid = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        lane_id = mod(tid - 1, WARP_SIZE)
+
+        if (tid <= n) then
+            val = input(tid)
+        else
+            val = -1.0e30  ! Very small for max
+        endif
+
+        warp_max = warp_reduce_max_real(val)
+
+        if (lane_id == 0 .and. warp_id <= (n + WARP_SIZE - 1) / WARP_SIZE) then
+            output(warp_id) = warp_max
+        endif
+    end subroutine test_warp_max_kernel
+
+end module test_kernels
+
+!================================================================
+! Main test program
+!================================================================
+program test_warp_shuffle
+    use cudafor
+    use warp_shuffle
+    use test_kernels
+    implicit none
+
+    integer, parameter :: N = 1024  ! Test with 1024 elements (32 warps)
+    integer, parameter :: THREADS_PER_BLOCK = 256
+
+    real(4), allocatable :: h_input(:), h_output(:)
+    real(4), device, allocatable :: d_input(:), d_output(:)
+
+    integer :: i, num_warps, num_blocks
+    real(4) :: expected_sum, expected_max, actual_sum
+    integer :: istat
+    integer(8) :: start_time, end_time, count_rate
+    real(4) :: elapsed_ms
+
+    print *, "=================================================================="
+    print *, "Warp Shuffle Test - v28c"
+    print *, "=================================================================="
+    print *, ""
+
+    ! Calculate dimensions
+    num_warps = (N + WARP_SIZE - 1) / WARP_SIZE
+    num_blocks = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK
+
+    print *, "Test configuration:"
+    print *, "  Elements:        ", N
+    print *, "  Warps:           ", num_warps
+    print *, "  Threads/block:   ", THREADS_PER_BLOCK
+    print *, "  Blocks:          ", num_blocks
+    print *, ""
+
+    ! Allocate memory
+    allocate(h_input(N))
+    allocate(h_output(num_warps))
+    allocate(d_input(N))
+    allocate(d_output(num_warps))
+
+    ! Initialize with test data
+    do i = 1, N
+        h_input(i) = real(i)
+    end do
+
+    ! Copy to device
+    d_input = h_input
+
+    !================================================================
+    ! Test 1: Warp-level sum reduction
+    !================================================================
+    print *, "Test 1: Warp-level SUM reduction"
+    print *, "--------------------------------"
+
+    call system_clock(start_time, count_rate)
+
+    call test_warp_sum_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(d_input, d_output, N)
+    istat = cudaDeviceSynchronize()
+
+    call system_clock(end_time)
+    elapsed_ms = real(end_time - start_time) / real(count_rate) * 1000.0
+
+    ! Copy results back
+    h_output = d_output
+
+    ! Verify first warp (elements 1-32)
+    expected_sum = 0.0
+    do i = 1, 32
+        expected_sum = expected_sum + real(i)
+    end do
+    ! Sum of 1 to 32 = 32*33/2 = 528
+
+    print *, "  Warp 1 (elements 1-32):"
+    print *, "    Expected sum: ", expected_sum
+    print *, "    Actual sum:   ", h_output(1)
+    if (abs(h_output(1) - expected_sum) < 0.001) then
+        print *, "    ✅ PASS"
+    else
+        print *, "    ❌ FAIL"
+    endif
+
+    ! Verify second warp (elements 33-64)
+    expected_sum = 0.0
+    do i = 33, 64
+        expected_sum = expected_sum + real(i)
+    end do
+    ! Sum of 33 to 64 = (33+64)*32/2 = 1552
+
+    print *, "  Warp 2 (elements 33-64):"
+    print *, "    Expected sum: ", expected_sum
+    print *, "    Actual sum:   ", h_output(2)
+    if (abs(h_output(2) - expected_sum) < 0.001) then
+        print *, "    ✅ PASS"
+    else
+        print *, "    ❌ FAIL"
+    endif
+
+    print *, "  Time: ", elapsed_ms, " ms"
+    print *, ""
+
+    !================================================================
+    ! Test 2: Warp-level max reduction
+    !================================================================
+    print *, "Test 2: Warp-level MAX reduction"
+    print *, "--------------------------------"
+
+    call test_warp_max_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(d_input, d_output, N)
+    istat = cudaDeviceSynchronize()
+
+    h_output = d_output
+
+    ! Warp 1 max should be 32
+    expected_max = 32.0
+    print *, "  Warp 1 (elements 1-32):"
+    print *, "    Expected max: ", expected_max
+    print *, "    Actual max:   ", h_output(1)
+    if (abs(h_output(1) - expected_max) < 0.001) then
+        print *, "    ✅ PASS"
+    else
+        print *, "    ❌ FAIL"
+    endif
+
+    ! Warp 2 max should be 64
+    expected_max = 64.0
+    print *, "  Warp 2 (elements 33-64):"
+    print *, "    Expected max: ", expected_max
+    print *, "    Actual max:   ", h_output(2)
+    if (abs(h_output(2) - expected_max) < 0.001) then
+        print *, "    ✅ PASS"
+    else
+        print *, "    ❌ FAIL"
+    endif
+    print *, ""
+
+    !================================================================
+    ! Summary
+    !================================================================
+    print *, "=================================================================="
+    print *, "Warp Shuffle Test Complete!"
+    print *, ""
+    print *, "If all tests passed, warp shuffle intrinsics are working correctly."
+    print *, ""
+    print *, "Next steps for v28c:"
+    print *, "  1. Integrate warp shuffle into BatchNorm (mean/variance)"
+    print *, "  2. Optimize loss reduction with warp shuffle"
+    print *, "  3. Benchmark speedup vs current implementation"
+    print *, "=================================================================="
+
+    ! Cleanup
+    deallocate(h_input, h_output)
+    deallocate(d_input, d_output)
+
+end program test_warp_shuffle

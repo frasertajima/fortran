@@ -1,0 +1,140 @@
+!================================================================
+! Adam Optimizer Module - v28 Baseline
+!================================================================
+! NVIDIA Apex FusedAdam implementation in CUDA Fortran
+!
+! This module provides GPU-accelerated Adam optimizer updates
+! matching NVIDIA's Apex FusedAdam implementation.
+!
+! Features:
+!   - Fused momentum and variance updates
+!   - L2 weight decay (decoupled from gradient)
+!   - Bias correction (PyTorch-compatible)
+!   - Support for 1D, 2D, and 4D tensors
+!
+! This module is shared across ALL datasets.
+!
+! Usage:
+!   call adam_update_4d(weights, grads, m, v, lr, bias_corr1, bias_corr2)
+!   call adam_update_2d(weights, grads, m, v, lr, bias_corr1, bias_corr2)
+!   call adam_update_1d(weights, grads, m, v, lr, bias_corr1, bias_corr2)
+!
+! Where:
+!   bias_corr1 = 1.0 - beta1^t
+!   bias_corr2 = 1.0 - beta2^t
+!
+! Author: v28 Baseline Team
+! Date: 2025-11-16
+!================================================================
+module apex_adam_kernels
+    use cudafor
+    implicit none
+
+    ! Adam hyperparameters (matching PyTorch defaults)
+    real(4), parameter :: adam_beta1 = 0.9
+    real(4), parameter :: adam_beta2 = 0.999
+    real(4), parameter :: adam_epsilon = 1e-8
+    real(4), parameter :: weight_decay = 1e-4
+contains
+
+    !================================================================
+    ! Apex FusedAdam: 4D tensor (conv weights)
+    !================================================================
+    ! For convolutional layer weights: (kernel_h, kernel_w, in_ch, out_ch)
+    subroutine adam_update_4d(weights, gradients, m, v, lr, bias_corr1, bias_corr2)
+        real(4), device, intent(inout) :: weights(:,:,:,:), m(:,:,:,:), v(:,:,:,:)
+        real(4), device, intent(in) :: gradients(:,:,:,:)
+        real(4), intent(in) :: lr, bias_corr1, bias_corr2
+        integer :: i, j, k, l
+        real(4) :: corrected_lr, denom, update
+
+        ! Corrected learning rate (PyTorch bias correction)
+        corrected_lr = lr * sqrt(bias_corr2) / bias_corr1
+
+        ! Apex FusedAdam formula (matching NVIDIA reference)
+        !$cuf kernel do(4)
+        do l = 1, size(weights, 4)
+            do k = 1, size(weights, 3)
+                do j = 1, size(weights, 2)
+                    do i = 1, size(weights, 1)
+                        ! Update first moment (momentum)
+                        m(i,j,k,l) = adam_beta1 * m(i,j,k,l) + &
+                                    (1.0 - adam_beta1) * gradients(i,j,k,l)
+
+                        ! Update second moment (variance)
+                        v(i,j,k,l) = adam_beta2 * v(i,j,k,l) + &
+                                    (1.0 - adam_beta2) * gradients(i,j,k,l)**2
+
+                        ! Compute denominator (PyTorch mode: eps under sqrt)
+                        denom = sqrt(v(i,j,k,l) + adam_epsilon)
+
+                        ! Compute update with weight decay
+                        ! Note: Apex adds weight decay AFTER division by denom
+                        update = (m(i,j,k,l) / denom) + (weight_decay * weights(i,j,k,l))
+
+                        ! Update parameter
+                        weights(i,j,k,l) = weights(i,j,k,l) - corrected_lr * update
+                    end do
+                end do
+            end do
+        end do
+    end subroutine adam_update_4d
+
+    !================================================================
+    ! Apex FusedAdam: 2D tensor (FC weights)
+    !================================================================
+    ! For fully-connected layer weights: (in_features, out_features)
+    subroutine adam_update_2d(weights, gradients, m, v, lr, bias_corr1, bias_corr2)
+        real(4), device, intent(inout) :: weights(:,:), m(:,:), v(:,:)
+        real(4), device, intent(in) :: gradients(:,:)
+        real(4), intent(in) :: lr, bias_corr1, bias_corr2
+        integer :: i, j
+        real(4) :: corrected_lr, denom, update
+
+        corrected_lr = lr * sqrt(bias_corr2) / bias_corr1
+
+        !$cuf kernel do(2)
+        do j = 1, size(weights, 2)
+            do i = 1, size(weights, 1)
+                ! Update moments
+                m(i,j) = adam_beta1 * m(i,j) + (1.0 - adam_beta1) * gradients(i,j)
+                v(i,j) = adam_beta2 * v(i,j) + (1.0 - adam_beta2) * gradients(i,j)**2
+
+                ! Compute update (Apex formula)
+                denom = sqrt(v(i,j) + adam_epsilon)
+                update = (m(i,j) / denom) + (weight_decay * weights(i,j))
+
+                ! Update parameter
+                weights(i,j) = weights(i,j) - corrected_lr * update
+            end do
+        end do
+    end subroutine adam_update_2d
+
+    !================================================================
+    ! Apex FusedAdam: 1D tensor (biases)
+    !================================================================
+    ! For bias vectors: (features)
+    subroutine adam_update_1d(weights, gradients, m, v, lr, bias_corr1, bias_corr2)
+        real(4), device, intent(inout) :: weights(:), m(:), v(:)
+        real(4), device, intent(in) :: gradients(:)
+        real(4), intent(in) :: lr, bias_corr1, bias_corr2
+        integer :: i
+        real(4) :: corrected_lr, denom, update
+
+        corrected_lr = lr * sqrt(bias_corr2) / bias_corr1
+
+        !$cuf kernel do(1)
+        do i = 1, size(weights, 1)
+            ! Update moments
+            m(i) = adam_beta1 * m(i) + (1.0 - adam_beta1) * gradients(i)
+            v(i) = adam_beta2 * v(i) + (1.0 - adam_beta2) * gradients(i)**2
+
+            ! Compute update (Apex formula)
+            denom = sqrt(v(i) + adam_epsilon)
+            update = (m(i) / denom) + (weight_decay * weights(i))
+
+            ! Update parameter
+            weights(i) = weights(i) - corrected_lr * update
+        end do
+    end subroutine adam_update_1d
+end module apex_adam_kernels

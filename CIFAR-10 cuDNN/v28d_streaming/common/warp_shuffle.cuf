@@ -1,0 +1,359 @@
+!================================================================
+! Warp Shuffle Module - v28c
+!================================================================
+! Implements warp-level reduction using CUDA Fortran intrinsics
+!
+! CUDA Fortran intrinsics:
+!   __shfl(val, srcLane)      - broadcast from srcLane
+!   __shfl_down(val, delta)   - get value from lane+delta
+!   __shfl_up(val, delta)     - get value from lane-delta
+!   __shfl_xor(val, laneMask) - butterfly shuffle (symmetric!)
+!
+! Note: For SUM reduction, use __shfl_xor (butterfly pattern)
+!       __shfl_down returns caller's value if out of range,
+!       which causes double-counting in sum but not max/min.
+!
+! Author: v28c Warp Shuffle Team
+! Date: 2025-11-21
+!================================================================
+module warp_shuffle
+    use cudafor
+    implicit none
+
+    ! Warp size (32 threads on all NVIDIA GPUs)
+    integer, parameter :: WARP_SIZE = 32
+
+contains
+
+    !================================================================
+    ! Warp-level sum reduction using __shfl_xor (butterfly pattern)
+    !================================================================
+    ! Uses XOR shuffle for symmetric exchange - avoids double-counting!
+    ! Example with 8 threads:
+    !   Step 1 (xor 4): 0<->4, 1<->5, 2<->6, 3<->7
+    !   Step 2 (xor 2): 0<->2, 1<->3, 4<->6, 5<->7
+    !   Step 3 (xor 1): 0<->1, 2<->3, 4<->5, 6<->7
+    ! All threads end up with the same sum!
+    !================================================================
+    attributes(device) function warp_reduce_sum_real(val) result(sum)
+        real(4), intent(in) :: val
+        real(4) :: sum
+
+        sum = val
+
+        ! Butterfly reduction: symmetric exchange avoids double-counting
+        sum = sum + __shfl_xor(sum, 16)
+        sum = sum + __shfl_xor(sum, 8)
+        sum = sum + __shfl_xor(sum, 4)
+        sum = sum + __shfl_xor(sum, 2)
+        sum = sum + __shfl_xor(sum, 1)
+
+        ! All threads now have the sum (no broadcast needed!)
+    end function warp_reduce_sum_real
+
+    !================================================================
+    ! Warp-level max reduction using __shfl_xor
+    !================================================================
+    attributes(device) function warp_reduce_max_real(val) result(max_val)
+        real(4), intent(in) :: val
+        real(4) :: max_val, other
+
+        max_val = val
+
+        other = __shfl_xor(max_val, 16)
+        max_val = max(max_val, other)
+        other = __shfl_xor(max_val, 8)
+        max_val = max(max_val, other)
+        other = __shfl_xor(max_val, 4)
+        max_val = max(max_val, other)
+        other = __shfl_xor(max_val, 2)
+        max_val = max(max_val, other)
+        other = __shfl_xor(max_val, 1)
+        max_val = max(max_val, other)
+
+        ! All threads have max
+    end function warp_reduce_max_real
+
+    !================================================================
+    ! Warp-level min reduction using __shfl_xor
+    !================================================================
+    attributes(device) function warp_reduce_min_real(val) result(min_val)
+        real(4), intent(in) :: val
+        real(4) :: min_val, other
+
+        min_val = val
+
+        other = __shfl_xor(min_val, 16)
+        min_val = min(min_val, other)
+        other = __shfl_xor(min_val, 8)
+        min_val = min(min_val, other)
+        other = __shfl_xor(min_val, 4)
+        min_val = min(min_val, other)
+        other = __shfl_xor(min_val, 2)
+        min_val = min(min_val, other)
+        other = __shfl_xor(min_val, 1)
+        min_val = min(min_val, other)
+
+    end function warp_reduce_min_real
+
+    !================================================================
+    ! Integer sum reduction using __shfl_xor
+    !================================================================
+    attributes(device) function warp_reduce_sum_int(val) result(sum)
+        integer, intent(in) :: val
+        integer :: sum
+
+        sum = val
+        sum = sum + __shfl_xor(sum, 16)
+        sum = sum + __shfl_xor(sum, 8)
+        sum = sum + __shfl_xor(sum, 4)
+        sum = sum + __shfl_xor(sum, 2)
+        sum = sum + __shfl_xor(sum, 1)
+    end function warp_reduce_sum_int
+
+end module warp_shuffle
+
+!================================================================
+! GPU Metrics Module - v28c
+!================================================================
+! GPU-based loss and accuracy computation using warp shuffle
+! Eliminates CPU transfer overhead in training loop
+!================================================================
+module gpu_metrics
+    use cudafor
+    use warp_shuffle
+    implicit none
+
+    ! Shared memory for inter-warp reduction
+    ! Max 32 warps per block (1024 threads / 32)
+    integer, parameter :: MAX_WARPS = 32
+
+contains
+
+    !================================================================
+    ! Cross-entropy loss kernel with warp shuffle reduction
+    !================================================================
+    ! Each thread handles one sample, computes -log(prob[label])
+    ! Then reduces across the block using warp shuffle
+    !================================================================
+    attributes(global) subroutine cross_entropy_loss_kernel(probs, labels, &
+                                                             partial_loss, batch_size, num_classes)
+        real(4), device, intent(in) :: probs(:,:)      ! (batch_size, num_classes)
+        integer, device, intent(in) :: labels(:)        ! (batch_size) - 0-indexed labels
+        real(4), device, intent(out) :: partial_loss(:) ! (num_blocks) - partial sums
+        integer, value :: batch_size, num_classes
+
+        ! Shared memory for warp partial sums
+        real(4), shared :: warp_sums(MAX_WARPS)
+
+        integer :: tid, global_tid, lane_id, warp_id, num_warps
+        real(4) :: my_loss, warp_sum, block_sum
+        integer :: label_idx
+
+        tid = threadIdx%x
+        global_tid = (blockIdx%x - 1) * blockDim%x + tid
+        lane_id = mod(tid - 1, WARP_SIZE)
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        num_warps = (blockDim%x + WARP_SIZE - 1) / WARP_SIZE
+
+        ! Each thread computes loss for one sample
+        if (global_tid <= batch_size) then
+            label_idx = labels(global_tid) + 1  ! Convert 0-indexed to 1-indexed
+            my_loss = -log(max(probs(global_tid, label_idx), 1.0e-7))
+        else
+            my_loss = 0.0
+        endif
+
+        ! Warp-level reduction
+        warp_sum = warp_reduce_sum_real(my_loss)
+
+        ! Lane 0 of each warp writes to shared memory
+        if (lane_id == 0) then
+            warp_sums(warp_id) = warp_sum
+        endif
+
+        call syncthreads()
+
+        ! First warp reduces all warp sums
+        if (warp_id == 1) then
+            if (tid <= num_warps) then
+                warp_sum = warp_sums(tid)
+            else
+                warp_sum = 0.0
+            endif
+            block_sum = warp_reduce_sum_real(warp_sum)
+
+            ! Thread 1 writes block result
+            if (tid == 1) then
+                partial_loss(blockIdx%x) = block_sum
+            endif
+        endif
+    end subroutine cross_entropy_loss_kernel
+
+    !================================================================
+    ! Accuracy counting kernel with warp shuffle reduction
+    !================================================================
+    ! Each thread checks if prediction matches label
+    ! Reduces correct count across block using warp shuffle
+    !================================================================
+    attributes(global) subroutine accuracy_kernel(probs, labels, &
+                                                   partial_correct, batch_size, num_classes)
+        real(4), device, intent(in) :: probs(:,:)        ! (batch_size, num_classes)
+        integer, device, intent(in) :: labels(:)          ! (batch_size) - 0-indexed labels
+        integer, device, intent(out) :: partial_correct(:) ! (num_blocks) - partial counts
+        integer, value :: batch_size, num_classes
+
+        ! Shared memory for warp partial sums
+        integer, shared :: warp_counts(MAX_WARPS)
+
+        integer :: tid, global_tid, lane_id, warp_id, num_warps
+        integer :: my_correct, warp_count, block_count
+        integer :: j, pred_class
+        real(4) :: max_prob
+
+        tid = threadIdx%x
+        global_tid = (blockIdx%x - 1) * blockDim%x + tid
+        lane_id = mod(tid - 1, WARP_SIZE)
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        num_warps = (blockDim%x + WARP_SIZE - 1) / WARP_SIZE
+
+        ! Each thread checks one sample
+        my_correct = 0
+        if (global_tid <= batch_size) then
+            ! Find predicted class (argmax)
+            max_prob = probs(global_tid, 1)
+            pred_class = 0
+            do j = 2, num_classes
+                if (probs(global_tid, j) > max_prob) then
+                    max_prob = probs(global_tid, j)
+                    pred_class = j - 1  ! 0-indexed
+                endif
+            end do
+
+            if (pred_class == labels(global_tid)) then
+                my_correct = 1
+            endif
+        endif
+
+        ! Warp-level reduction
+        warp_count = warp_reduce_sum_int(my_correct)
+
+        ! Lane 0 of each warp writes to shared memory
+        if (lane_id == 0) then
+            warp_counts(warp_id) = warp_count
+        endif
+
+        call syncthreads()
+
+        ! First warp reduces all warp counts
+        if (warp_id == 1) then
+            if (tid <= num_warps) then
+                warp_count = warp_counts(tid)
+            else
+                warp_count = 0
+            endif
+            block_count = warp_reduce_sum_int(warp_count)
+
+            ! Thread 1 writes block result
+            if (tid == 1) then
+                partial_correct(blockIdx%x) = block_count
+            endif
+        endif
+    end subroutine accuracy_kernel
+
+    !================================================================
+    ! Final reduction kernel - reduces partial results to single value
+    ! Note: result is an array to allow passing array element from host
+    !================================================================
+    attributes(global) subroutine final_reduce_real_kernel(partial, result, n)
+        real(4), device, intent(in) :: partial(:)
+        real(4), device, intent(inout) :: result(:)  ! Array for reliable D2H
+        integer, value :: n
+
+        real(4), shared :: warp_sums(MAX_WARPS)
+        integer :: tid, lane_id, warp_id, num_warps
+        real(4) :: my_val, warp_sum, total
+
+        tid = threadIdx%x
+        lane_id = mod(tid - 1, WARP_SIZE)
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        num_warps = (blockDim%x + WARP_SIZE - 1) / WARP_SIZE
+
+        ! Load values
+        if (tid <= n) then
+            my_val = partial(tid)
+        else
+            my_val = 0.0
+        endif
+
+        ! Warp-level reduction
+        warp_sum = warp_reduce_sum_real(my_val)
+
+        if (lane_id == 0) then
+            warp_sums(warp_id) = warp_sum
+        endif
+
+        call syncthreads()
+
+        ! First warp reduces
+        if (warp_id == 1) then
+            if (tid <= num_warps) then
+                warp_sum = warp_sums(tid)
+            else
+                warp_sum = 0.0
+            endif
+            total = warp_reduce_sum_real(warp_sum)
+
+            if (tid == 1) then
+                result(1) = total
+            endif
+        endif
+    end subroutine final_reduce_real_kernel
+
+    !================================================================
+    ! Final reduction kernel for integers
+    ! Note: result is an array to allow passing array element from host
+    !================================================================
+    attributes(global) subroutine final_reduce_int_kernel(partial, result, n)
+        integer, device, intent(in) :: partial(:)
+        integer, device, intent(inout) :: result(:)  ! Array for reliable D2H
+        integer, value :: n
+
+        integer, shared :: warp_counts(MAX_WARPS)
+        integer :: tid, lane_id, warp_id, num_warps
+        integer :: my_val, warp_count, total
+
+        tid = threadIdx%x
+        lane_id = mod(tid - 1, WARP_SIZE)
+        warp_id = (tid - 1) / WARP_SIZE + 1
+        num_warps = (blockDim%x + WARP_SIZE - 1) / WARP_SIZE
+
+        if (tid <= n) then
+            my_val = partial(tid)
+        else
+            my_val = 0
+        endif
+
+        warp_count = warp_reduce_sum_int(my_val)
+
+        if (lane_id == 0) then
+            warp_counts(warp_id) = warp_count
+        endif
+
+        call syncthreads()
+
+        if (warp_id == 1) then
+            if (tid <= num_warps) then
+                warp_count = warp_counts(tid)
+            else
+                warp_count = 0
+            endif
+            total = warp_reduce_sum_int(warp_count)
+
+            if (tid == 1) then
+                result(1) = total
+            endif
+        endif
+    end subroutine final_reduce_int_kernel
+
+end module gpu_metrics
