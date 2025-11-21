@@ -4,7 +4,7 @@
 
 ## 🎯 What's Here
 
-This repository contains the **v28 Baseline plus export modules** - a production-ready, modular CUDA Fortran framework for training CNNs on GPU.
+This repository contains the **v28 Baseline plus export modules** - a modular CUDA Fortran framework for training CNNs on GPU.
 
 ### Key Features
 
