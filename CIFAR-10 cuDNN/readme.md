@@ -6,7 +6,9 @@ CIFAR-10 using cuDNN instrinics matching PyTorch in accuracy and execution speed
 cuDNN functions that were attempted
 
 Update: 
-Use the 2 line version 28 workflow to go from zero to training. Now optimised for 4x PyTorch speed and modular design. ![`v28baseline_plus_export`](https://github.com/frasertajima/fortran/tree/main/CIFAR-10%20cuDNN/v28_baseline_plus_export) enables further inference and testing using Jupyter notebooks and python.
+Use the 2 line version 28 workflow to go from zero to training. Now optimised for 4x PyTorch speed and modular design. 
+
+![`v28baseline_plus_export`](https://github.com/frasertajima/fortran/tree/main/CIFAR-10%20cuDNN/v28_baseline_plus_export) enables further inference and testing using Jupyter notebooks and python.
 
 *Version 28b (in testing) provides managed memory (enabling for example 34GB datasets to be processed on an 8GB GPU without crashing--unlike CuPy or PyTorch). Version 28c has cuDNN warp shuffle, used in the GPU diagnostics for example, which cuts 2s off the total training time in CIFAR-10. Version 28d is refining managed memory to enable async batch loading of the dataset to handle exteremely large datasets limited only by the SSD, not main RAM. With the ability to handle a 4TB dataset, after v28d is tested and working, scientific computing projects should be accessible: ![any ideas for scientific computing projects on large datasets?](https://felixquinihildebet.wordpress.com/2025/11/20/can-someone-suggest-a-scientific-project-involving-a-large-dataset-that-is-difficult-for-pytorch/)*
 
