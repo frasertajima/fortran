@@ -282,7 +282,7 @@ The `-mp` flag enables OpenMP for async I/O threading.
 
 ---
 
-**Repository**: https://github.com/frasertajima/fortran/CIFAR-10_cuDNN
+**Repository**: `https://github.com/frasertajima/fortran/CIFAR-10 cuDNN`
 
 **Version**: v28d Streaming Architecture
 
