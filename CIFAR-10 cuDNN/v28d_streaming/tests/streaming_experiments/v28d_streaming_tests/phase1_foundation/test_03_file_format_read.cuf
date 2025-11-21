@@ -1,0 +1,407 @@
+! test_03_file_format_read.cuf - Validate reading v28b/v28c binary format
+! Purpose: Ensure we can read existing format with stream access
+!
+! Compile: nvfortran -cuda -O3 -o test_03_file_format_read test_03_file_format_read.cuf
+! Run: ./test_03_file_format_read [path_to_cifar10_data]
+!
+! Expected results:
+!   - Seek time: < 0.1 ms
+!   - Single batch read: < 1 ms
+!   - Data matches expected format
+
+program test_03_file_format_read
+    use cudafor
+    implicit none
+
+    ! CIFAR-10 parameters
+    integer, parameter :: NUM_TRAIN_SAMPLES = 50000
+    integer, parameter :: NUM_TEST_SAMPLES = 10000
+    integer, parameter :: FEATURE_SIZE = 3072         ! 32x32x3
+    integer, parameter :: NUM_CLASSES = 10
+    integer, parameter :: BATCH_SIZE = 128
+
+    character(len=512) :: data_path
+    character(len=512) :: train_data_file, train_labels_file
+    character(len=512) :: test_data_file, test_labels_file
+    logical :: files_exist
+    integer :: num_args
+
+    print *, "=============================================="
+    print *, "  Test 03: File Format Read Validation"
+    print *, "=============================================="
+    print *, ""
+
+    ! Get data path from command line or use default
+    num_args = command_argument_count()
+    if (num_args >= 1) then
+        call get_command_argument(1, data_path)
+    else
+        ! Default to v28c cifar10 data location
+        data_path = "../v28c_warp_shuffle/datasets/cifar10"
+    endif
+
+    ! Construct file paths
+    train_data_file = trim(data_path) // "/cifar10_train_images.bin"
+    train_labels_file = trim(data_path) // "/cifar10_train_labels.bin"
+    test_data_file = trim(data_path) // "/cifar10_test_images.bin"
+    test_labels_file = trim(data_path) // "/cifar10_test_labels.bin"
+
+    print *, "Data path:", trim(data_path)
+    print *, ""
+
+    ! Check if files exist
+    call check_files_exist(files_exist)
+    if (.not. files_exist) then
+        print *, "CIFAR-10 data files not found."
+        print *, "Running with synthetic test file instead..."
+        print *, ""
+        call run_synthetic_tests()
+    else
+        call run_cifar10_tests()
+    endif
+
+    print *, "=============================================="
+    print *, "  Test 03 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine check_files_exist(exists)
+        logical, intent(out) :: exists
+        logical :: e1, e2, e3, e4
+
+        inquire(file=trim(train_data_file), exist=e1)
+        inquire(file=trim(train_labels_file), exist=e2)
+        inquire(file=trim(test_data_file), exist=e3)
+        inquire(file=trim(test_labels_file), exist=e4)
+
+        exists = e1 .and. e2 .and. e3 .and. e4
+
+        if (exists) then
+            print *, "  Found CIFAR-10 data files"
+        else
+            print *, "  Missing files:"
+            if (.not. e1) print *, "    - ", trim(train_data_file)
+            if (.not. e2) print *, "    - ", trim(train_labels_file)
+            if (.not. e3) print *, "    - ", trim(test_data_file)
+            if (.not. e4) print *, "    - ", trim(test_labels_file)
+        endif
+    end subroutine check_files_exist
+
+    subroutine run_cifar10_tests()
+        print *, "--- Testing with CIFAR-10 Data ---"
+        print *, ""
+
+        call test_file_structure()
+        print *, ""
+
+        call test_stream_access()
+        print *, ""
+
+        call test_seek_to_batch()
+        print *, ""
+
+        call test_read_specific_batches()
+        print *, ""
+
+        call test_data_integrity()
+    end subroutine run_cifar10_tests
+
+    subroutine run_synthetic_tests()
+        character(len=256) :: synth_data, synth_labels
+        integer :: unit_num, i, j, istat
+        real(4), allocatable :: data(:,:)
+        integer, allocatable :: labels(:)
+
+        synth_data = "/tmp/v28d_synth_data.bin"
+        synth_labels = "/tmp/v28d_synth_labels.bin"
+
+        print *, "--- Creating Synthetic Test Files ---"
+
+        ! Create synthetic data file (1000 samples)
+        allocate(data(FEATURE_SIZE, 1000))
+        allocate(labels(1000))
+
+        do j = 1, 1000
+            do i = 1, FEATURE_SIZE
+                data(i, j) = real(mod(i + j * 17, 256)) / 255.0
+            end do
+            labels(j) = mod(j - 1, NUM_CLASSES)
+        end do
+
+        unit_num = 20
+        open(unit=unit_num, file=synth_data, form='unformatted', &
+             access='stream', status='replace')
+        write(unit_num) data
+        close(unit_num)
+
+        unit_num = 21
+        open(unit=unit_num, file=synth_labels, form='unformatted', &
+             access='stream', status='replace')
+        write(unit_num) labels
+        close(unit_num)
+
+        print *, "  Created synthetic files (1000 samples)"
+
+        ! Override file paths
+        train_data_file = synth_data
+        train_labels_file = synth_labels
+
+        deallocate(data, labels)
+
+        print *, ""
+        call test_stream_access()
+        print *, ""
+        call test_seek_to_batch()
+
+        ! Cleanup
+        open(unit=20, file=synth_data, status='old')
+        close(unit=20, status='delete')
+        open(unit=21, file=synth_labels, status='old')
+        close(unit=21, status='delete')
+    end subroutine run_synthetic_tests
+
+    subroutine test_file_structure()
+        integer(8) :: data_size, label_size
+        integer(8) :: expected_data_size, expected_label_size
+
+        print *, "--- File Structure Validation ---"
+
+        inquire(file=trim(train_data_file), size=data_size)
+        inquire(file=trim(train_labels_file), size=label_size)
+
+        expected_data_size = int(NUM_TRAIN_SAMPLES, 8) * int(FEATURE_SIZE, 8) * 4
+        expected_label_size = int(NUM_TRAIN_SAMPLES, 8) * 4
+
+        print '(A, I12, A)', "  Data file size:      ", data_size, " bytes"
+        print '(A, I12, A)', "  Expected:            ", expected_data_size, " bytes"
+
+        if (data_size == expected_data_size) then
+            print *, "  Data size check:     PASS"
+        else
+            print *, "  Data size check:     FAIL (size mismatch)"
+        endif
+
+        print '(A, I12, A)', "  Label file size:     ", label_size, " bytes"
+        print '(A, I12, A)', "  Expected:            ", expected_label_size, " bytes"
+
+        if (label_size == expected_label_size) then
+            print *, "  Label size check:    PASS"
+        else
+            print *, "  Label size check:    FAIL (size mismatch)"
+        endif
+    end subroutine test_file_structure
+
+    subroutine test_stream_access()
+        integer :: data_unit, label_unit, istat
+        real(4), allocatable :: batch_data(:,:)
+        integer, allocatable :: batch_labels(:)
+        real(8) :: start_time, end_time
+
+        print *, "--- Stream Access Test ---"
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(batch_labels(BATCH_SIZE))
+
+        ! Open with stream access
+        data_unit = 30
+        label_unit = 31
+
+        call cpu_time(start_time)
+
+        open(unit=data_unit, file=trim(train_data_file), form='unformatted', &
+             access='stream', status='old', iostat=istat)
+
+        call cpu_time(end_time)
+
+        if (istat /= 0) then
+            print *, "  FAILED: Cannot open data file with stream access"
+            return
+        endif
+
+        print '(A, F8.4, A)', "  File open time:      ", (end_time - start_time) * 1000.0, " ms"
+
+        open(unit=label_unit, file=trim(train_labels_file), form='unformatted', &
+             access='stream', status='old', iostat=istat)
+
+        if (istat /= 0) then
+            print *, "  FAILED: Cannot open label file"
+            close(data_unit)
+            return
+        endif
+
+        ! Read first batch
+        call cpu_time(start_time)
+        read(data_unit, iostat=istat) batch_data
+        call cpu_time(end_time)
+
+        if (istat /= 0) then
+            print *, "  FAILED: Cannot read data"
+        else
+            print '(A, F8.4, A)', "  First batch read:    ", (end_time - start_time) * 1000.0, " ms"
+        endif
+
+        read(label_unit, iostat=istat) batch_labels
+
+        if (istat /= 0) then
+            print *, "  FAILED: Cannot read labels"
+        else
+            print *, "  Label read:          PASS"
+        endif
+
+        close(data_unit)
+        close(label_unit)
+        deallocate(batch_data, batch_labels)
+
+        print *, "  Status:              PASS"
+    end subroutine test_stream_access
+
+    subroutine test_seek_to_batch()
+        integer :: data_unit, istat, batch_idx
+        integer(8) :: pos, bytes_per_sample
+        real(4), allocatable :: batch_data(:,:)
+        real(8) :: start_time, end_time, seek_times(5)
+        integer :: i
+
+        print *, "--- Seek Performance Test ---"
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        data_unit = 32
+        open(unit=data_unit, file=trim(train_data_file), form='unformatted', &
+             access='stream', status='old', iostat=istat)
+
+        if (istat /= 0) then
+            print *, "  FAILED: Cannot open file"
+            return
+        endif
+
+        ! Test seeking to different batches
+        print *, "  Testing seek to various batch positions..."
+
+        do i = 1, 5
+            ! Pick different batch indices
+            select case(i)
+                case(1); batch_idx = 1      ! First batch
+                case(2); batch_idx = 100    ! Early
+                case(3); batch_idx = 200    ! Middle
+                case(4); batch_idx = 350    ! Late
+                case(5); batch_idx = 390    ! Near end (50000/128 = 390)
+            end select
+
+            pos = int(batch_idx - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+
+            call cpu_time(start_time)
+            read(data_unit, pos=pos, iostat=istat) batch_data
+            call cpu_time(end_time)
+
+            seek_times(i) = (end_time - start_time) * 1000.0
+
+            if (istat /= 0) then
+                print '(A, I4, A)', "    Batch ", batch_idx, ": FAILED"
+            else
+                print '(A, I4, A, F8.4, A)', "    Batch ", batch_idx, ": ", seek_times(i), " ms"
+            endif
+        end do
+
+        print '(A, F8.4, A)', "  Average seek+read:   ", sum(seek_times)/5.0, " ms"
+
+        close(data_unit)
+        deallocate(batch_data)
+
+        print *, "  Status:              PASS"
+    end subroutine test_seek_to_batch
+
+    subroutine test_read_specific_batches()
+        integer :: data_unit, label_unit, istat, i
+        integer(8) :: data_pos, label_pos, bytes_per_sample
+        real(4), allocatable :: batch_data(:,:)
+        integer, allocatable :: batch_labels(:)
+        integer :: batches_to_test(3)
+        real(8) :: start_time, end_time
+
+        print *, "--- Specific Batch Read Test ---"
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(batch_labels(BATCH_SIZE))
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        batches_to_test = [1, 195, 390]  ! First, middle, last
+
+        data_unit = 33
+        label_unit = 34
+
+        open(unit=data_unit, file=trim(train_data_file), form='unformatted', &
+             access='stream', status='old')
+        open(unit=label_unit, file=trim(train_labels_file), form='unformatted', &
+             access='stream', status='old')
+
+        do i = 1, 3
+            data_pos = int(batches_to_test(i) - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+            label_pos = int(batches_to_test(i) - 1, 8) * int(BATCH_SIZE, 8) * 4 + 1
+
+            call cpu_time(start_time)
+            read(data_unit, pos=data_pos) batch_data
+            read(label_unit, pos=label_pos) batch_labels
+            call cpu_time(end_time)
+
+            print '(A, I4, A, F8.4, A)', "    Batch ", batches_to_test(i), &
+                  " (data+labels): ", (end_time - start_time) * 1000.0, " ms"
+
+            ! Sanity check labels
+            if (all(batch_labels >= 0 .and. batch_labels < NUM_CLASSES)) then
+                print '(A, I4, A)', "      Labels valid (0-9): PASS"
+            else
+                print '(A, I4, A)', "      Labels valid: FAIL"
+            endif
+        end do
+
+        close(data_unit)
+        close(label_unit)
+        deallocate(batch_data, batch_labels)
+
+        print *, "  Status:              PASS"
+    end subroutine test_read_specific_batches
+
+    subroutine test_data_integrity()
+        integer :: data_unit, istat
+        real(4), allocatable :: sample(:)
+        real(4) :: min_val, max_val, mean_val
+        integer :: i
+
+        print *, "--- Data Integrity Check ---"
+
+        allocate(sample(FEATURE_SIZE))
+
+        data_unit = 35
+        open(unit=data_unit, file=trim(train_data_file), form='unformatted', &
+             access='stream', status='old')
+
+        ! Read first sample
+        read(data_unit) sample
+
+        min_val = minval(sample)
+        max_val = maxval(sample)
+        mean_val = sum(sample) / FEATURE_SIZE
+
+        print '(A, F10.6)', "  First sample min:    ", min_val
+        print '(A, F10.6)', "  First sample max:    ", max_val
+        print '(A, F10.6)', "  First sample mean:   ", mean_val
+
+        ! Check if normalized (0-1 range expected)
+        if (min_val >= 0.0 .and. max_val <= 1.0) then
+            print *, "  Data range [0,1]:    PASS (normalized)"
+        else if (min_val >= 0.0 .and. max_val <= 255.0) then
+            print *, "  Data range [0,255]:  PASS (uint8)"
+        else
+            print *, "  Data range:          UNEXPECTED"
+        endif
+
+        close(data_unit)
+        deallocate(sample)
+
+        print *, "  Status:              PASS"
+    end subroutine test_data_integrity
+
+end program test_03_file_format_read

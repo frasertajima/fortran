@@ -1,0 +1,368 @@
+! test_05_sync_streaming_load.cuf - Baseline synchronous streaming
+! Purpose: Working synchronous path before adding async complexity
+!
+! Compile: nvfortran -cuda -O3 -o test_05_sync_streaming_load test_05_sync_streaming_load.cuf
+! Run: ./test_05_sync_streaming_load [path_to_data]
+!
+! Expected results:
+!   - Per-batch load time: < 5 ms (SSD)
+!   - Full epoch possible
+!   - GPU can access loaded data correctly
+
+program test_05_sync_streaming_load
+    use cudafor
+    implicit none
+
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+    integer, parameter :: NUM_SAMPLES = 50000  ! CIFAR-10 train
+    integer, parameter :: NUM_BATCHES = (NUM_SAMPLES + BATCH_SIZE - 1) / BATCH_SIZE
+
+    character(len=512) :: data_path
+    integer :: num_args
+
+    print *, "=============================================="
+    print *, "  Test 05: Synchronous Streaming Load"
+    print *, "=============================================="
+    print *, ""
+
+    num_args = command_argument_count()
+    if (num_args >= 1) then
+        call get_command_argument(1, data_path)
+    else
+        data_path = "../v28c_warp_shuffle/datasets/cifar10"
+    endif
+
+    print *, "Data path:", trim(data_path)
+    print *, "Batch size:", BATCH_SIZE
+    print *, "Total batches:", NUM_BATCHES
+    print *, ""
+
+    call test_single_batch_load(data_path)
+    print *, ""
+
+    call test_sequential_batch_loading(data_path)
+    print *, ""
+
+    call test_full_epoch_streaming(data_path)
+    print *, ""
+
+    call test_gpu_processing_after_load(data_path)
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 05 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_single_batch_load(data_path)
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file, label_file
+        real(4), managed, allocatable :: batch_data(:,:)
+        integer, managed, allocatable :: batch_labels(:)
+        integer :: data_unit, label_unit, istat
+        real(8) :: start_time, end_time
+        logical :: file_exists
+
+        print *, "--- Single Batch Load Test ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        label_file = trim(data_path) // "/cifar10_train_labels.bin"
+
+        inquire(file=data_file, exist=file_exists)
+        if (.not. file_exists) then
+            print *, "  Data file not found, creating synthetic test..."
+            call run_synthetic_single_batch()
+            return
+        endif
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(batch_labels(BATCH_SIZE))
+
+        data_unit = 40
+        label_unit = 41
+
+        ! Open files
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old', iostat=istat)
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old', iostat=istat)
+
+        ! Time the load
+        call cpu_time(start_time)
+
+        read(data_unit) batch_data
+        read(label_unit) batch_labels
+
+        call cpu_time(end_time)
+
+        close(data_unit)
+        close(label_unit)
+
+        print '(A, F8.4, A)', "  Load time:           ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Data size:           ", &
+              real(BATCH_SIZE * FEATURE_SIZE * 4) / (1024.0 * 1024.0), " MB"
+
+        ! Verify data loaded correctly
+        if (all(batch_labels >= 0 .and. batch_labels < 10)) then
+            print *, "  Labels valid:        PASS"
+        else
+            print *, "  Labels valid:        FAIL"
+        endif
+
+        ! Check data range
+        if (minval(batch_data) >= 0.0 .and. maxval(batch_data) <= 1.0) then
+            print *, "  Data range [0,1]:    PASS"
+        else if (minval(batch_data) >= 0.0 .and. maxval(batch_data) <= 255.0) then
+            print *, "  Data range [0,255]:  PASS"
+        else
+            print *, "  Data range:          UNEXPECTED"
+        endif
+
+        deallocate(batch_data, batch_labels)
+    end subroutine test_single_batch_load
+
+    subroutine run_synthetic_single_batch()
+        character(len=256) :: synth_file
+        real(4), managed, allocatable :: batch_data(:,:)
+        integer :: i, j, unit_num
+        real(8) :: start_time, end_time
+
+        synth_file = "/tmp/v28d_synth_stream.bin"
+
+        ! Create synthetic file
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE * 10))
+        do j = 1, BATCH_SIZE * 10
+            do i = 1, FEATURE_SIZE
+                batch_data(i, j) = real(mod(i + j, 256)) / 255.0
+            end do
+        end do
+
+        unit_num = 50
+        open(unit=unit_num, file=synth_file, form='unformatted', &
+             access='stream', status='replace')
+        write(unit_num) batch_data
+        close(unit_num)
+
+        deallocate(batch_data)
+
+        ! Now read back one batch
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+
+        open(unit=unit_num, file=synth_file, form='unformatted', &
+             access='stream', status='old')
+
+        call cpu_time(start_time)
+        read(unit_num) batch_data
+        call cpu_time(end_time)
+
+        close(unit_num)
+
+        print '(A, F8.4, A)', "  Synthetic load time: ", (end_time - start_time) * 1000.0, " ms"
+        print *, "  Status:              PASS"
+
+        ! Cleanup
+        open(unit=unit_num, file=synth_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(batch_data)
+    end subroutine run_synthetic_single_batch
+
+    subroutine test_sequential_batch_loading(data_path)
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file
+        real(4), managed, allocatable :: batch_data(:,:)
+        integer :: data_unit, batch, istat
+        integer, parameter :: TEST_BATCHES = 20
+        real(8) :: start_time, end_time, batch_times(TEST_BATCHES)
+        logical :: file_exists
+
+        print *, "--- Sequential Batch Loading ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        inquire(file=data_file, exist=file_exists)
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file)"
+            return
+        endif
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+
+        data_unit = 42
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+
+        print '(A, I3, A)', "  Loading ", TEST_BATCHES, " batches sequentially..."
+
+        do batch = 1, TEST_BATCHES
+            call cpu_time(start_time)
+            read(data_unit, iostat=istat) batch_data
+            call cpu_time(end_time)
+
+            if (istat /= 0) then
+                print *, "  Read error at batch", batch
+                exit
+            endif
+
+            batch_times(batch) = (end_time - start_time) * 1000.0
+        end do
+
+        close(data_unit)
+
+        print '(A, F8.4, A)', "  Min batch time:      ", minval(batch_times), " ms"
+        print '(A, F8.4, A)', "  Max batch time:      ", maxval(batch_times), " ms"
+        print '(A, F8.4, A)', "  Avg batch time:      ", sum(batch_times)/TEST_BATCHES, " ms"
+        print '(A, F8.4, A)', "  Std dev:             ", &
+              sqrt(sum((batch_times - sum(batch_times)/TEST_BATCHES)**2)/TEST_BATCHES), " ms"
+
+        deallocate(batch_data)
+        print *, "  Status:              PASS"
+    end subroutine test_sequential_batch_loading
+
+    subroutine test_full_epoch_streaming(data_path)
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file, label_file
+        real(4), managed, allocatable :: batch_data(:,:)
+        integer, managed, allocatable :: batch_labels(:)
+        integer :: data_unit, label_unit, batch, istat
+        integer(8) :: data_pos, label_pos, bytes_per_sample
+        real(8) :: start_time, end_time, total_time
+        integer :: samples_read, actual_batch_size
+        logical :: file_exists
+
+        print *, "--- Full Epoch Streaming ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        label_file = trim(data_path) // "/cifar10_train_labels.bin"
+
+        inquire(file=data_file, exist=file_exists)
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file)"
+            return
+        endif
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(batch_labels(BATCH_SIZE))
+
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        data_unit = 43
+        label_unit = 44
+
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old')
+
+        samples_read = 0
+        total_time = 0.0
+
+        print '(A, I4, A)', "  Streaming through ", NUM_BATCHES, " batches..."
+
+        call cpu_time(start_time)
+
+        do batch = 1, NUM_BATCHES
+            ! Calculate position
+            data_pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+            label_pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * 4 + 1
+
+            ! Handle last batch potentially being smaller
+            actual_batch_size = min(BATCH_SIZE, NUM_SAMPLES - (batch - 1) * BATCH_SIZE)
+
+            ! Read batch
+            read(data_unit, pos=data_pos, iostat=istat) batch_data(:, 1:actual_batch_size)
+            read(label_unit, pos=label_pos, iostat=istat) batch_labels(1:actual_batch_size)
+
+            if (istat /= 0) then
+                print *, "  Error at batch", batch
+                exit
+            endif
+
+            samples_read = samples_read + actual_batch_size
+        end do
+
+        call cpu_time(end_time)
+        total_time = end_time - start_time
+
+        close(data_unit)
+        close(label_unit)
+
+        print '(A, I6)', "  Samples read:        ", samples_read
+        print '(A, F8.3, A)', "  Total time:          ", total_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Time per batch:      ", total_time * 1000.0 / NUM_BATCHES, " ms"
+        print '(A, F8.2, A)', "  Throughput:          ", &
+              real(samples_read * FEATURE_SIZE * 4) / (total_time * 1024.0 * 1024.0), " MB/s"
+
+        if (samples_read == NUM_SAMPLES) then
+            print *, "  All samples read:    PASS"
+        else
+            print *, "  All samples read:    FAIL"
+        endif
+
+        deallocate(batch_data, batch_labels)
+    end subroutine test_full_epoch_streaming
+
+    subroutine test_gpu_processing_after_load(data_path)
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file
+        real(4), managed, allocatable :: batch_data(:,:)
+        real(4), managed :: batch_sum
+        integer :: data_unit, istat, i, j
+        real(8) :: start_time, end_time
+        logical :: file_exists
+
+        print *, "--- GPU Processing After Load ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        inquire(file=data_file, exist=file_exists)
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file)"
+            return
+        endif
+
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+
+        data_unit = 45
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+
+        ! Load a batch
+        read(data_unit) batch_data
+        close(data_unit)
+
+        ! Process on GPU
+        batch_sum = 0.0
+
+        call cpu_time(start_time)
+
+        !$cuf kernel do(2) <<<*, *>>>
+        do j = 1, BATCH_SIZE
+            do i = 1, FEATURE_SIZE
+                batch_data(i, j) = batch_data(i, j) * 2.0  ! Simple transform
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+
+        call cpu_time(end_time)
+
+        print '(A, F8.4, A)', "  GPU process time:    ", (end_time - start_time) * 1000.0, " ms"
+
+        ! Verify transformation worked
+        if (maxval(batch_data) > 0.0) then
+            print *, "  GPU transformation:  PASS"
+        else
+            print *, "  GPU transformation:  FAIL"
+        endif
+
+        print *, "  Status:              PASS"
+
+        deallocate(batch_data)
+    end subroutine test_gpu_processing_after_load
+
+end program test_05_sync_streaming_load

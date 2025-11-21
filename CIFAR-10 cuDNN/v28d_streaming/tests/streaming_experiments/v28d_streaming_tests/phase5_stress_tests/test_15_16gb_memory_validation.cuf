@@ -1,0 +1,323 @@
+! test_15_16gb_memory_validation.cuf - Validate streaming with 16GB dataset (2x GPU RAM)
+! Purpose: Confirm memory stays bounded with dataset larger than GPU memory
+!
+! Compile: nvfortran -cuda -mp -O3 -o test_15_16gb_memory_validation test_15_16gb_memory_validation.cuf
+! Run: OMP_NUM_THREADS=2 ./test_15_16gb_memory_validation
+!
+! This test creates a 16GB synthetic dataset file and streams through it
+! while monitoring both GPU and system memory usage.
+
+program test_15_16gb_memory_validation
+    use cudafor
+    use omp_lib
+    implicit none
+
+    ! CIFAR-10-like parameters but scaled up
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072         ! 32x32x3
+    integer(8), parameter :: BYTES_PER_SAMPLE = FEATURE_SIZE * 4
+    integer(8), parameter :: BYTES_PER_BATCH = BATCH_SIZE * BYTES_PER_SAMPLE
+
+    ! 32GB dataset parameters (4x GPU RAM - stress test)
+    integer(8), parameter :: TARGET_SIZE_GB = 32
+    integer(8), parameter :: TARGET_SIZE_BYTES = TARGET_SIZE_GB * 1024_8 * 1024_8 * 1024_8
+    integer(8), parameter :: NUM_SAMPLES = TARGET_SIZE_BYTES / BYTES_PER_SAMPLE
+    integer(8), parameter :: NUM_BATCHES = NUM_SAMPLES / BATCH_SIZE
+
+    ! Test parameters
+    integer, parameter :: BATCHES_PER_EPOCH = 1000    ! Don't need full epoch for validation
+    integer, parameter :: NUM_EPOCHS = 3
+    integer, parameter :: MEMORY_CHECK_INTERVAL = 100
+
+    character(len=256) :: data_file
+    logical :: create_file
+
+    print *, "=============================================="
+    print *, "  Test 15: 32GB Dataset Memory Validation"
+    print *, "=============================================="
+    print *, ""
+    print *, "Target dataset size:", TARGET_SIZE_GB, "GB"
+    print '(A, I12)', "  Total samples:       ", NUM_SAMPLES
+    print '(A, I12)', "  Total batches:       ", NUM_BATCHES
+    print '(A, I12)', "  Bytes per batch:     ", BYTES_PER_BATCH
+    print *, ""
+    print *, "This test validates that memory stays bounded"
+    print *, "regardless of dataset size (streaming architecture)."
+    print *, ""
+
+    data_file = "/var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/results/v28d_32gb_test.bin"
+
+    ! Check if file exists, offer to create
+    call check_or_create_file(data_file, create_file)
+
+    if (create_file) then
+        call create_16gb_dataset(data_file)
+    endif
+
+    print *, ""
+    call run_streaming_validation(data_file)
+
+    print *, ""
+    print *, "=============================================="
+    print *, "  Test 15 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine check_or_create_file(filename, should_create)
+        character(len=*), intent(in) :: filename
+        logical, intent(out) :: should_create
+        logical :: exists
+        integer(8) :: file_size
+
+        inquire(file=filename, exist=exists, size=file_size)
+
+        if (exists .and. file_size >= TARGET_SIZE_BYTES * 0.9) then
+            print *, "Found existing 32GB test file"
+            print '(A, F6.2, A)', "  Size: ", real(file_size)/(1024.0**3), " GB"
+            should_create = .false.
+        else
+            print *, "32GB test file not found or too small"
+            print *, "Creating new test file (this may take a few minutes)..."
+            should_create = .true.
+        endif
+    end subroutine check_or_create_file
+
+    subroutine create_16gb_dataset(filename)
+        character(len=*), intent(in) :: filename
+        real(4), allocatable :: write_buffer(:,:)
+        integer :: unit_num, i, j
+        integer(8) :: batches_written, total_batches_to_write
+        real(8) :: start_time, end_time, elapsed
+        real(8) :: last_report_time, current_time
+
+        print *, ""
+        print *, "--- Creating 32GB Synthetic Dataset ---"
+
+        allocate(write_buffer(FEATURE_SIZE, BATCH_SIZE))
+
+        unit_num = 200
+        open(unit=unit_num, file=filename, form='unformatted', &
+             access='stream', status='replace')
+
+        ! Write enough batches to reach 16GB
+        total_batches_to_write = TARGET_SIZE_BYTES / BYTES_PER_BATCH
+
+        call cpu_time(start_time)
+        last_report_time = start_time
+        batches_written = 0
+
+        do while (batches_written < total_batches_to_write)
+            ! Fill buffer with pseudo-random data (deterministic for verification)
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    write_buffer(i, j) = real(mod(int(batches_written) * BATCH_SIZE + j + i, 256)) / 255.0
+                end do
+            end do
+
+            write(unit_num) write_buffer
+            batches_written = batches_written + 1
+
+            ! Progress report every 5 seconds
+            call cpu_time(current_time)
+            if (current_time - last_report_time > 5.0) then
+                elapsed = current_time - start_time
+                print '(A, F6.2, A, F6.2, A, F6.1, A)', &
+                      "    Progress: ", &
+                      real(batches_written * BYTES_PER_BATCH) / (1024.0**3), " GB written (", &
+                      100.0 * real(batches_written) / real(total_batches_to_write), "%), ", &
+                      real(batches_written * BYTES_PER_BATCH) / (elapsed * 1024.0**2), " MB/s"
+                last_report_time = current_time
+            endif
+        end do
+
+        close(unit_num)
+
+        call cpu_time(end_time)
+        elapsed = end_time - start_time
+
+        print '(A, F8.2, A)', "  File created in ", elapsed, " seconds"
+        print '(A, F8.2, A)', "  Write speed: ", &
+              real(TARGET_SIZE_BYTES) / (elapsed * 1024.0**2), " MB/s"
+
+        deallocate(write_buffer)
+    end subroutine create_16gb_dataset
+
+    subroutine run_streaming_validation(filename)
+        character(len=*), intent(in) :: filename
+
+        ! Double buffer structure
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            integer, managed, allocatable :: labels(:)
+            integer :: batch_idx
+            logical :: ready
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buf, loading_buf, temp_ptr
+
+        integer :: data_unit, epoch, batch, i, j
+        integer(8) :: pos, wrap_batch
+        integer :: istat
+        integer(8) :: gpu_free_start, gpu_free_current, gpu_total
+        real(8) :: epoch_start, epoch_end, total_time
+        real(8) :: gpu_min_free, gpu_max_used
+        real(4) :: dummy_loss
+
+        print *, "--- Streaming Validation (Double Buffer + OpenMP) ---"
+        print *, ""
+
+        ! Allocate double buffers
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_a%labels(BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%labels(BATCH_SIZE))
+
+        buffer_a%labels = 0
+        buffer_b%labels = 0
+
+        ! Get initial GPU memory
+        istat = cudaMemGetInfo(gpu_free_start, gpu_total)
+        gpu_min_free = real(gpu_free_start)
+        gpu_max_used = 0.0
+
+        print '(A, F6.2, A)', "  GPU total memory:    ", real(gpu_total)/(1024.0**3), " GB"
+        print '(A, F6.2, A)', "  GPU free at start:   ", real(gpu_free_start)/(1024.0**3), " GB"
+        print '(A, I6)', "  Batches per epoch:   ", BATCHES_PER_EPOCH
+        print '(A, I6)', "  Epochs to run:       ", NUM_EPOCHS
+        print *, ""
+
+        data_unit = 201
+        total_time = 0.0
+
+        do epoch = 1, NUM_EPOCHS
+            print '(A, I2, A)', "  Epoch ", epoch, " starting..."
+
+            open(unit=data_unit, file=filename, form='unformatted', &
+                 access='stream', status='old')
+
+            ! Set up double buffer pointers
+            current_buf => buffer_a
+            loading_buf => buffer_b
+
+            ! Pre-load first batch
+            read(data_unit) current_buf%data
+            current_buf%batch_idx = 1
+            current_buf%ready = .true.
+
+            call cpu_time(epoch_start)
+
+            do batch = 1, BATCHES_PER_EPOCH
+                ! Calculate position for next batch (wrap around file)
+                wrap_batch = mod(int(batch, 8), NUM_BATCHES) + 1
+                pos = (wrap_batch - 1) * BYTES_PER_BATCH + 1
+
+                !$omp parallel sections num_threads(2)
+
+                !$omp section
+                ! GPU Thread: Process current batch
+                call simulate_training_step(current_buf%data, dummy_loss)
+
+                !$omp section
+                ! I/O Thread: Load next batch
+                if (batch < BATCHES_PER_EPOCH) then
+                    read(data_unit, pos=pos) loading_buf%data
+                    loading_buf%batch_idx = batch + 1
+                    loading_buf%ready = .true.
+                endif
+
+                !$omp end parallel sections
+
+                ! Swap buffers
+                temp_ptr => current_buf
+                current_buf => loading_buf
+                loading_buf => temp_ptr
+
+                ! Periodic memory check
+                if (mod(batch, MEMORY_CHECK_INTERVAL) == 0) then
+                    istat = cudaMemGetInfo(gpu_free_current, gpu_total)
+                    if (real(gpu_free_current) < gpu_min_free) then
+                        gpu_min_free = real(gpu_free_current)
+                    endif
+                    gpu_max_used = real(gpu_total) - gpu_min_free
+                endif
+            end do
+
+            call cpu_time(epoch_end)
+            close(data_unit)
+
+            total_time = total_time + (epoch_end - epoch_start)
+
+            ! Report epoch stats
+            istat = cudaMemGetInfo(gpu_free_current, gpu_total)
+            print '(A, I2, A, F8.2, A, F6.2, A)', &
+                  "    Epoch ", epoch, " done: ", &
+                  (epoch_end - epoch_start) * 1000.0, " ms, GPU free: ", &
+                  real(gpu_free_current)/(1024.0**3), " GB"
+        end do
+
+        print *, ""
+        print *, "--- Memory Usage Summary ---"
+        print '(A, F6.2, A)', "  GPU memory at start: ", real(gpu_free_start)/(1024.0**3), " GB free"
+        print '(A, F6.2, A)', "  GPU minimum free:    ", gpu_min_free/(1024.0**3), " GB"
+        print '(A, F6.2, A)', "  GPU max used:        ", gpu_max_used/(1024.0**3), " GB"
+        print '(A, F6.2, A)', "  Memory increase:     ", &
+              (real(gpu_free_start) - gpu_min_free)/(1024.0**2), " MB"
+        print *, ""
+
+        ! Validation check
+        if ((real(gpu_free_start) - gpu_min_free) < 500.0 * 1024.0 * 1024.0) then
+            print *, "  MEMORY BOUNDED: PASS"
+            print *, "    GPU memory usage stayed within ~500 MB"
+            print *, "    (Only double buffers allocated, not full dataset)"
+        else
+            print *, "  MEMORY BOUNDED: WARNING"
+            print *, "    GPU memory usage exceeded expected bounds"
+        endif
+
+        print *, ""
+        print *, "--- Performance Summary ---"
+        print '(A, F8.2, A)', "  Total time:          ", total_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Time per batch:      ", &
+              total_time * 1000.0 / (NUM_EPOCHS * BATCHES_PER_EPOCH), " ms"
+        print '(A, F8.2, A)', "  Throughput:          ", &
+              real(NUM_EPOCHS * BATCHES_PER_EPOCH * BYTES_PER_BATCH) / (total_time * 1024.0**2), " MB/s"
+
+        deallocate(buffer_a%data, buffer_a%labels)
+        deallocate(buffer_b%data, buffer_b%labels)
+    end subroutine run_streaming_validation
+
+    subroutine simulate_training_step(batch_data, loss)
+        real(4), managed :: batch_data(:,:)
+        real(4), intent(out) :: loss
+
+        integer :: i, j, iter, istat
+        real(4) :: sum_val
+
+        ! Simulate forward + backward pass with multiple kernel iterations
+        do iter = 1, 50  ! ~50ms of GPU work
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    batch_data(i, j) = batch_data(i, j) * 1.0001 + 0.00001
+                end do
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+
+        ! Compute dummy loss
+        sum_val = 0.0
+        !$cuf kernel do(2) <<<*, *>>> reduce(+:sum_val)
+        do j = 1, BATCH_SIZE
+            do i = 1, FEATURE_SIZE
+                sum_val = sum_val + batch_data(i, j)
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+        loss = sum_val / (BATCH_SIZE * FEATURE_SIZE)
+    end subroutine simulate_training_step
+
+end program test_15_16gb_memory_validation

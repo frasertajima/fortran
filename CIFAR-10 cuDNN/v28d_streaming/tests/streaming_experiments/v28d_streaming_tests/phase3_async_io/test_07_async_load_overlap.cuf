@@ -1,0 +1,432 @@
+! test_07_async_load_overlap.cuf - Validate I/O and GPU overlap
+! Purpose: Core test for double-buffering effectiveness
+!
+! Compile: nvfortran -cuda -mp -O3 -o test_07_async_load_overlap test_07_async_load_overlap.cuf
+! Run: OMP_NUM_THREADS=2 ./test_07_async_load_overlap [path_to_data]
+!
+! Expected results:
+!   - Overlap percentage: > 90%
+!   - I/O wait time: < 10% of batch time
+!   - Data correctness: 100%
+
+program test_07_async_load_overlap
+    use cudafor
+    use omp_lib
+    implicit none
+
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+    integer, parameter :: NUM_TEST_BATCHES = 50
+    integer, parameter :: GPU_WORK_ITERATIONS = 100  ! Simulate real GPU work
+
+    character(len=512) :: data_path
+    integer :: num_args
+
+    print *, "=============================================="
+    print *, "  Test 07: Async I/O Overlap Validation"
+    print *, "=============================================="
+    print *, ""
+
+    num_args = command_argument_count()
+    if (num_args >= 1) then
+        call get_command_argument(1, data_path)
+    else
+        data_path = "../v28c_warp_shuffle/datasets/cifar10"
+    endif
+
+    print *, "OMP Max Threads:", omp_get_max_threads()
+    print *, ""
+
+    call test_baseline_sequential()
+    print *, ""
+
+    call test_double_buffer_overlap()
+    print *, ""
+
+    call test_overlap_with_real_data(data_path)
+    print *, ""
+
+    call test_measure_overlap_percentage()
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 07 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine simulate_gpu_work(buffer, iterations)
+        real(4), managed :: buffer(:,:)
+        integer, intent(in) :: iterations
+
+        integer :: iter, i, j, istat
+
+        do iter = 1, iterations
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    buffer(i, j) = buffer(i, j) * 1.001 + 0.0001
+                end do
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+    end subroutine simulate_gpu_work
+
+    subroutine test_baseline_sequential()
+        ! Baseline: Sequential I/O then GPU (no overlap)
+        real(4), managed, allocatable :: buffer(:,:)
+        character(len=256) :: temp_file
+        integer :: unit_num, batch, istat
+        real(8) :: start_time, end_time, io_total, gpu_total
+
+        print *, "--- Baseline: Sequential (No Overlap) ---"
+
+        allocate(buffer(FEATURE_SIZE, BATCH_SIZE))
+
+        ! Create temp file
+        temp_file = "/tmp/v28d_async_test.bin"
+        unit_num = 70
+
+        buffer = 1.0
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        do batch = 1, NUM_TEST_BATCHES
+            write(unit_num) buffer
+        end do
+        close(unit_num)
+
+        io_total = 0.0
+        gpu_total = 0.0
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        call cpu_time(start_time)
+
+        do batch = 1, NUM_TEST_BATCHES
+            ! I/O phase
+            call cpu_time(io_total)
+            read(unit_num) buffer
+            call cpu_time(end_time)
+            io_total = io_total + (end_time - io_total)
+
+            ! GPU phase
+            call cpu_time(gpu_total)
+            call simulate_gpu_work(buffer, GPU_WORK_ITERATIONS)
+            call cpu_time(end_time)
+            gpu_total = gpu_total + (end_time - gpu_total)
+        end do
+
+        call cpu_time(end_time)
+
+        close(unit_num)
+
+        print '(A, I4, A)', "  Batches processed:   ", NUM_TEST_BATCHES
+        print '(A, F8.3, A)', "  Total time:          ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Avg per batch:       ", &
+              (end_time - start_time) * 1000.0 / NUM_TEST_BATCHES, " ms"
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(buffer)
+    end subroutine test_baseline_sequential
+
+    subroutine test_double_buffer_overlap()
+        ! Double buffer with OpenMP overlap
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            logical :: ready
+            integer :: batch_idx
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buf, loading_buf, temp_ptr
+        character(len=256) :: temp_file
+        integer :: unit_num, batch, istat
+        real(8) :: start_time, end_time, sequential_time
+        integer(8) :: batch_pos, bytes_per_batch
+
+        print *, "--- Double Buffer with OpenMP Overlap ---"
+
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+
+        buffer_a%ready = .false.
+        buffer_b%ready = .false.
+        buffer_a%batch_idx = 0
+        buffer_b%batch_idx = 0
+
+        ! Create temp file with multiple batches
+        temp_file = "/tmp/v28d_double_buf_test.bin"
+        unit_num = 71
+        bytes_per_batch = int(FEATURE_SIZE, 8) * int(BATCH_SIZE, 8) * 4
+
+        buffer_a%data = 1.0
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        do batch = 1, NUM_TEST_BATCHES + 1
+            write(unit_num) buffer_a%data
+        end do
+        close(unit_num)
+
+        ! Set up double buffer pointers
+        current_buf => buffer_a
+        loading_buf => buffer_b
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        ! Pre-load first batch into current
+        read(unit_num) current_buf%data
+        current_buf%ready = .true.
+        current_buf%batch_idx = 1
+
+        call cpu_time(start_time)
+
+        do batch = 1, NUM_TEST_BATCHES
+            ! Calculate next batch position
+            batch_pos = int(batch, 8) * bytes_per_batch + 1
+
+            !$omp parallel sections num_threads(2)
+
+            !$omp section
+            ! GPU Thread: Process current buffer
+            call simulate_gpu_work(current_buf%data, GPU_WORK_ITERATIONS)
+
+            !$omp section
+            ! I/O Thread: Load next batch into loading buffer
+            read(unit_num, pos=batch_pos) loading_buf%data
+            loading_buf%ready = .true.
+            loading_buf%batch_idx = batch + 1
+
+            !$omp end parallel sections
+
+            ! Swap buffers
+            temp_ptr => current_buf
+            current_buf => loading_buf
+            loading_buf => temp_ptr
+        end do
+
+        call cpu_time(end_time)
+
+        close(unit_num)
+
+        print '(A, I4, A)', "  Batches processed:   ", NUM_TEST_BATCHES
+        print '(A, F8.3, A)', "  Total time:          ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Avg per batch:       ", &
+              (end_time - start_time) * 1000.0 / NUM_TEST_BATCHES, " ms"
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(buffer_a%data, buffer_b%data)
+    end subroutine test_double_buffer_overlap
+
+    subroutine test_overlap_with_real_data(data_path)
+        character(len=*), intent(in) :: data_path
+
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            integer, managed, allocatable :: labels(:)
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buf, loading_buf, temp_ptr
+        character(len=512) :: data_file, label_file
+        integer :: data_unit, label_unit, batch, istat
+        integer(8) :: data_pos, label_pos, bytes_per_sample
+        real(8) :: start_time, end_time
+        logical :: file_exists
+
+        print *, "--- Overlap with Real CIFAR-10 Data ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        inquire(file=data_file, exist=file_exists)
+
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file at ", trim(data_path), ")"
+            return
+        endif
+
+        label_file = trim(data_path) // "/cifar10_train_labels.bin"
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_a%labels(BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%labels(BATCH_SIZE))
+
+        current_buf => buffer_a
+        loading_buf => buffer_b
+
+        data_unit = 72
+        label_unit = 73
+
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old')
+
+        ! Pre-load first batch
+        read(data_unit) current_buf%data
+        read(label_unit) current_buf%labels
+
+        call cpu_time(start_time)
+
+        do batch = 1, NUM_TEST_BATCHES
+            data_pos = int(batch, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+            label_pos = int(batch, 8) * int(BATCH_SIZE, 8) * 4 + 1
+
+            !$omp parallel sections num_threads(2)
+
+            !$omp section
+            ! GPU: Process current batch
+            call simulate_gpu_work(current_buf%data, GPU_WORK_ITERATIONS)
+
+            !$omp section
+            ! I/O: Load next batch
+            read(data_unit, pos=data_pos) loading_buf%data
+            read(label_unit, pos=label_pos) loading_buf%labels
+
+            !$omp end parallel sections
+
+            ! Swap
+            temp_ptr => current_buf
+            current_buf => loading_buf
+            loading_buf => temp_ptr
+        end do
+
+        call cpu_time(end_time)
+
+        close(data_unit)
+        close(label_unit)
+
+        print '(A, F8.3, A)', "  Total time:          ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Avg per batch:       ", &
+              (end_time - start_time) * 1000.0 / NUM_TEST_BATCHES, " ms"
+
+        ! Verify labels are valid
+        if (all(current_buf%labels >= 0 .and. current_buf%labels < 10)) then
+            print *, "  Data integrity:      PASS"
+        else
+            print *, "  Data integrity:      FAIL"
+        endif
+
+        deallocate(buffer_a%data, buffer_a%labels)
+        deallocate(buffer_b%data, buffer_b%labels)
+    end subroutine test_overlap_with_real_data
+
+    subroutine test_measure_overlap_percentage()
+        ! Detailed measurement of overlap efficiency
+        real(4), managed, allocatable, target :: buffer_a(:,:), buffer_b(:,:)
+        real(4), managed, pointer :: current_buf(:,:), loading_buf(:,:), temp_ptr(:,:)
+        character(len=256) :: temp_file
+        integer :: unit_num, batch, istat
+        integer(8) :: batch_pos, bytes_per_batch
+        real(8) :: total_start, total_end
+        real(8) :: io_times(NUM_TEST_BATCHES), gpu_times(NUM_TEST_BATCHES)
+        real(8) :: io_start, io_end, gpu_start, gpu_end
+        real(8) :: sum_io, sum_gpu, theoretical_sequential, actual_time
+        real(8) :: overlap_pct
+
+        print *, "--- Detailed Overlap Measurement ---"
+
+        allocate(buffer_a(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b(FEATURE_SIZE, BATCH_SIZE))
+
+        temp_file = "/tmp/v28d_overlap_measure.bin"
+        unit_num = 74
+        bytes_per_batch = int(FEATURE_SIZE, 8) * int(BATCH_SIZE, 8) * 4
+
+        ! Create test file
+        buffer_a = 1.0
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        do batch = 1, NUM_TEST_BATCHES + 1
+            write(unit_num) buffer_a
+        end do
+        close(unit_num)
+
+        current_buf => buffer_a
+        loading_buf => buffer_b
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        ! Pre-load
+        read(unit_num) current_buf
+
+        io_times = 0.0
+        gpu_times = 0.0
+
+        call cpu_time(total_start)
+
+        do batch = 1, NUM_TEST_BATCHES
+            batch_pos = int(batch, 8) * bytes_per_batch + 1
+
+            !$omp parallel sections num_threads(2)
+
+            !$omp section
+            ! GPU Thread
+            call cpu_time(gpu_start)
+            call simulate_gpu_work(current_buf, GPU_WORK_ITERATIONS)
+            call cpu_time(gpu_end)
+            gpu_times(batch) = gpu_end - gpu_start
+
+            !$omp section
+            ! I/O Thread
+            call cpu_time(io_start)
+            read(unit_num, pos=batch_pos) loading_buf
+            call cpu_time(io_end)
+            io_times(batch) = io_end - io_start
+
+            !$omp end parallel sections
+
+            ! Swap pointers
+            temp_ptr => current_buf
+            current_buf => loading_buf
+            loading_buf => temp_ptr
+        end do
+
+        call cpu_time(total_end)
+
+        close(unit_num)
+
+        ! Calculate metrics
+        sum_io = sum(io_times) * 1000.0
+        sum_gpu = sum(gpu_times) * 1000.0
+        theoretical_sequential = sum_io + sum_gpu
+        actual_time = (total_end - total_start) * 1000.0
+
+        overlap_pct = 100.0 * (1.0 - actual_time / theoretical_sequential)
+
+        print '(A, F8.3, A)', "  Total I/O time:      ", sum_io, " ms"
+        print '(A, F8.3, A)', "  Total GPU time:      ", sum_gpu, " ms"
+        print '(A, F8.3, A)', "  If sequential:       ", theoretical_sequential, " ms"
+        print '(A, F8.3, A)', "  Actual time:         ", actual_time, " ms"
+        print '(A, F6.1, A)', "  Overlap achieved:    ", overlap_pct, " %"
+        print '(A, F6.2, A)', "  Speedup:             ", theoretical_sequential / actual_time, "x"
+        print *, ""
+
+        if (overlap_pct > 80.0) then
+            print *, "  RESULT: EXCELLENT overlap (> 80%)"
+        else if (overlap_pct > 50.0) then
+            print *, "  RESULT: GOOD overlap (> 50%)"
+        else if (overlap_pct > 0.0) then
+            print *, "  RESULT: PARTIAL overlap"
+        else
+            print *, "  RESULT: NO overlap (may need triple buffer)"
+        endif
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(buffer_a, buffer_b)
+    end subroutine test_measure_overlap_percentage
+
+end program test_07_async_load_overlap

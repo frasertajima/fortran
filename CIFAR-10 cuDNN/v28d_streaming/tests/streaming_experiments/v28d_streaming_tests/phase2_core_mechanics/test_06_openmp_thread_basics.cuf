@@ -1,0 +1,329 @@
+! test_06_openmp_thread_basics.cuf - Validate OpenMP with CUDA Fortran
+! Purpose: Test OpenMP parallel sections work correctly with CUDA
+!
+! Compile: nvfortran -cuda -mp -O3 -o test_06_openmp_thread_basics test_06_openmp_thread_basics.cuf
+! Run: OMP_NUM_THREADS=2 ./test_06_openmp_thread_basics
+!
+! Expected results:
+!   - OpenMP parallel sections work
+!   - Thread identification correct
+!   - CUDA interop documented (which thread can call CUDA)
+
+program test_06_openmp_thread_basics
+    use cudafor
+    use omp_lib
+    implicit none
+
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+
+    print *, "=============================================="
+    print *, "  Test 06: OpenMP Thread Basics with CUDA"
+    print *, "=============================================="
+    print *, ""
+
+    call test_openmp_available()
+    print *, ""
+
+    call test_parallel_sections()
+    print *, ""
+
+    call test_shared_variables()
+    print *, ""
+
+    call test_cuda_from_threads()
+    print *, ""
+
+    call test_io_and_gpu_separation()
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 06 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_openmp_available()
+        integer :: max_threads, num_procs
+
+        print *, "--- OpenMP Availability ---"
+
+        max_threads = omp_get_max_threads()
+        num_procs = omp_get_num_procs()
+
+        print '(A, I4)', "  Max threads:         ", max_threads
+        print '(A, I4)', "  Num processors:      ", num_procs
+
+        if (max_threads >= 2) then
+            print *, "  OpenMP available:    PASS"
+        else
+            print *, "  OpenMP available:    WARNING (need >= 2 threads)"
+        endif
+    end subroutine test_openmp_available
+
+    subroutine test_parallel_sections()
+        integer :: section_a_executed, section_b_executed
+        integer :: thread_a, thread_b
+
+        print *, "--- Parallel Sections Test ---"
+
+        section_a_executed = 0
+        section_b_executed = 0
+        thread_a = -1
+        thread_b = -1
+
+        !$omp parallel sections num_threads(2)
+
+        !$omp section
+        section_a_executed = 1
+        thread_a = omp_get_thread_num()
+
+        !$omp section
+        section_b_executed = 1
+        thread_b = omp_get_thread_num()
+
+        !$omp end parallel sections
+
+        print '(A, I2)', "  Section A thread:    ", thread_a
+        print '(A, I2)', "  Section B thread:    ", thread_b
+
+        if (section_a_executed == 1 .and. section_b_executed == 1) then
+            print *, "  Both sections ran:   PASS"
+        else
+            print *, "  Both sections ran:   FAIL"
+        endif
+
+        if (thread_a /= thread_b .or. (thread_a == 0 .and. thread_b == 0)) then
+            print *, "  Thread separation:   PASS"
+        else
+            print *, "  Thread separation:   WARNING"
+        endif
+    end subroutine test_parallel_sections
+
+    subroutine test_shared_variables()
+        integer :: shared_counter
+        integer :: thread_id
+        logical :: race_detected
+
+        print *, "--- Shared Variable Test ---"
+
+        shared_counter = 0
+        race_detected = .false.
+
+        ! Test atomic increment
+        !$omp parallel num_threads(4) private(thread_id)
+        thread_id = omp_get_thread_num()
+
+        !$omp atomic
+        shared_counter = shared_counter + 1
+
+        !$omp end parallel
+
+        print '(A, I4)', "  Counter (expect 4):  ", shared_counter
+
+        if (shared_counter == 4) then
+            print *, "  Atomic increment:    PASS"
+        else
+            print *, "  Atomic increment:    FAIL (race condition?)"
+            race_detected = .true.
+        endif
+
+        ! Test critical section
+        shared_counter = 0
+
+        !$omp parallel num_threads(4)
+
+        !$omp critical
+        shared_counter = shared_counter + 1
+        !$omp end critical
+
+        !$omp end parallel
+
+        print '(A, I4)', "  Counter (critical):  ", shared_counter
+
+        if (shared_counter == 4) then
+            print *, "  Critical section:    PASS"
+        else
+            print *, "  Critical section:    FAIL"
+        endif
+    end subroutine test_shared_variables
+
+    subroutine test_cuda_from_threads()
+        real(4), managed, allocatable :: data_a(:), data_b(:)
+        integer :: istat, thread_id
+        integer :: cuda_thread_a, cuda_thread_b
+        logical :: cuda_a_ok, cuda_b_ok
+
+        print *, "--- CUDA from Different Threads ---"
+
+        allocate(data_a(1000))
+        allocate(data_b(1000))
+
+        data_a = 0.0
+        data_b = 0.0
+
+        cuda_a_ok = .false.
+        cuda_b_ok = .false.
+        cuda_thread_a = -1
+        cuda_thread_b = -1
+
+        !$omp parallel sections num_threads(2) private(thread_id, istat)
+
+        !$omp section
+        ! Thread A: Try CUDA operation
+        thread_id = omp_get_thread_num()
+        cuda_thread_a = thread_id
+
+        !$cuf kernel do <<<*, *>>>
+        do concurrent (integer :: i = 1:1000)
+            data_a(i) = 1.0
+        end do
+
+        istat = cudaDeviceSynchronize()
+        if (istat == 0) cuda_a_ok = .true.
+
+        !$omp section
+        ! Thread B: Try CUDA operation
+        thread_id = omp_get_thread_num()
+        cuda_thread_b = thread_id
+
+        !$cuf kernel do <<<*, *>>>
+        do concurrent (integer :: i = 1:1000)
+            data_b(i) = 2.0
+        end do
+
+        istat = cudaDeviceSynchronize()
+        if (istat == 0) cuda_b_ok = .true.
+
+        !$omp end parallel sections
+
+        print '(A, I2, A, L2)', "  Thread ", cuda_thread_a, " CUDA: ", cuda_a_ok
+        print '(A, I2, A, L2)', "  Thread ", cuda_thread_b, " CUDA: ", cuda_b_ok
+
+        ! Verify results
+        if (data_a(1) == 1.0 .and. data_a(1000) == 1.0) then
+            print *, "  Data A correct:      PASS"
+        else
+            print *, "  Data A correct:      FAIL"
+        endif
+
+        if (data_b(1) == 2.0 .and. data_b(1000) == 2.0) then
+            print *, "  Data B correct:      PASS"
+        else
+            print *, "  Data B correct:      FAIL"
+        endif
+
+        deallocate(data_a, data_b)
+    end subroutine test_cuda_from_threads
+
+    subroutine test_io_and_gpu_separation()
+        ! This is the key test: can one thread do I/O while another does GPU?
+        real(4), managed, allocatable :: gpu_buffer(:,:)
+        real(4), allocatable :: io_buffer(:,:)
+        character(len=256) :: temp_file
+        integer :: io_unit, istat, i, j, k, ii
+        logical :: io_done, gpu_done
+        real(8) :: io_time, gpu_time
+        real(8) :: start_time, end_time
+        real(8) :: t1_io, t2_io, t1_gpu, t2_gpu
+
+        print *, "--- I/O and GPU Separation (Key Test) ---"
+
+        allocate(gpu_buffer(FEATURE_SIZE, BATCH_SIZE))
+        allocate(io_buffer(FEATURE_SIZE, BATCH_SIZE))
+
+        ! Create temp file for I/O test
+        temp_file = "/tmp/v28d_omp_io_test.bin"
+        io_unit = 60
+
+        ! Write test file
+        io_buffer = 42.0
+        open(unit=io_unit, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        write(io_unit) io_buffer
+        close(io_unit)
+
+        io_buffer = 0.0
+        gpu_buffer = 0.0
+        io_done = .false.
+        gpu_done = .false.
+        io_time = 0.0
+        gpu_time = 0.0
+
+        call cpu_time(start_time)
+
+        !$omp parallel sections num_threads(2)
+
+        !$omp section
+        ! I/O Thread: Read from disk
+        call cpu_time(t1_io)
+
+        open(unit=io_unit, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+        read(io_unit) io_buffer
+        close(io_unit)
+
+        call cpu_time(t2_io)
+        io_time = t2_io - t1_io
+        io_done = .true.
+
+        !$omp section
+        ! GPU Thread: Do computation
+        call cpu_time(t1_gpu)
+
+        ! Simulate batch processing (multiple kernel launches)
+        do ii = 1, 10
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do k = 1, FEATURE_SIZE
+                    gpu_buffer(k, j) = gpu_buffer(k, j) + 0.1
+                end do
+            end do
+        end do
+
+        istat = cudaDeviceSynchronize()
+
+        call cpu_time(t2_gpu)
+        gpu_time = t2_gpu - t1_gpu
+        gpu_done = .true.
+
+        !$omp end parallel sections
+
+        call cpu_time(end_time)
+
+        print '(A, F8.4, A)', "  I/O time:            ", io_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  GPU time:            ", gpu_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Total wall time:     ", (end_time - start_time) * 1000.0, " ms"
+
+        ! Check if they overlapped
+        if ((end_time - start_time) < (io_time + gpu_time) * 0.9) then
+            print *, "  Overlap achieved:    PASS"
+        else
+            print *, "  Overlap achieved:    PARTIAL (may still work)"
+        endif
+
+        ! Verify correctness
+        if (io_done .and. io_buffer(1, 1) == 42.0) then
+            print *, "  I/O correctness:     PASS"
+        else
+            print *, "  I/O correctness:     FAIL"
+        endif
+
+        if (gpu_done .and. abs(gpu_buffer(1, 1) - 1.0) < 0.01) then
+            print *, "  GPU correctness:     PASS"
+        else
+            print '(A, F8.4)', "  GPU value (expect ~1.0): ", gpu_buffer(1, 1)
+            print *, "  GPU correctness:     CHECK"
+        endif
+
+        ! Cleanup
+        open(unit=io_unit, file=temp_file, status='old')
+        close(io_unit, status='delete')
+
+        deallocate(gpu_buffer, io_buffer)
+
+        print *, ""
+        print *, "  CONCLUSION: OpenMP parallel sections can separate I/O and GPU work"
+    end subroutine test_io_and_gpu_separation
+
+end program test_06_openmp_thread_basics

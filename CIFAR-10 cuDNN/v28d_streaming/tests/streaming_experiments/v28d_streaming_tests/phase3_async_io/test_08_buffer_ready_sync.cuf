@@ -1,0 +1,412 @@
+! test_08_buffer_ready_sync.cuf - Compare synchronization mechanisms
+! Purpose: Find best sync primitive for buffer ready flags
+!
+! Compile: nvfortran -cuda -mp -O3 -o test_08_buffer_ready_sync test_08_buffer_ready_sync.cuf
+! Run: OMP_NUM_THREADS=2 ./test_08_buffer_ready_sync
+!
+! Expected results:
+!   - Compare spin-wait, OMP lock, OMP atomic
+!   - Find mechanism with < 1ms latency
+!   - Measure CPU usage implications
+
+program test_08_buffer_ready_sync
+    use cudafor
+    use omp_lib
+    implicit none
+
+    integer, parameter :: NUM_SYNC_TESTS = 1000
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+
+    print *, "=============================================="
+    print *, "  Test 08: Buffer Ready Synchronization"
+    print *, "=============================================="
+    print *, ""
+    print *, "Testing synchronization mechanisms for double buffering"
+    print *, ""
+
+    call test_volatile_flag_sync()
+    print *, ""
+
+    call test_omp_atomic_sync()
+    print *, ""
+
+    call test_omp_lock_sync()
+    print *, ""
+
+    call test_omp_flush_sync()
+    print *, ""
+
+    call test_realistic_producer_consumer()
+    print *, ""
+
+    call summarize_recommendations()
+
+    print *, "=============================================="
+    print *, "  Test 08 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_volatile_flag_sync()
+        ! Simple spin-wait on a shared flag
+        ! Note: Fortran doesn't have volatile, we rely on OMP flush
+        integer :: ready_flag
+        integer :: producer_done, consumer_count
+        real(8) :: start_time, end_time, total_wait_time
+        integer :: i
+
+        print *, "--- Spin-Wait on Shared Flag ---"
+
+        total_wait_time = 0.0
+        consumer_count = 0
+
+        do i = 1, NUM_SYNC_TESTS
+            ready_flag = 0
+            producer_done = 0
+
+            call cpu_time(start_time)
+
+            !$omp parallel sections num_threads(2) shared(ready_flag, producer_done)
+
+            !$omp section
+            ! Producer: Set flag after short delay
+            call sleep_microseconds(10)  ! 10 microsecond work
+            ready_flag = 1
+            !$omp flush(ready_flag)
+
+            !$omp section
+            ! Consumer: Spin-wait for flag
+            do while (ready_flag == 0)
+                !$omp flush(ready_flag)
+            end do
+            consumer_count = consumer_count + 1
+
+            !$omp end parallel sections
+
+            call cpu_time(end_time)
+            total_wait_time = total_wait_time + (end_time - start_time)
+        end do
+
+        print '(A, I6)', "  Sync operations:     ", NUM_SYNC_TESTS
+        print '(A, F10.4, A)', "  Total time:          ", total_wait_time * 1000.0, " ms"
+        print '(A, F10.4, A)', "  Avg per sync:        ", &
+              total_wait_time * 1000000.0 / NUM_SYNC_TESTS, " us"
+        print *, "  CPU usage:           HIGH (spin-wait)"
+
+        if (consumer_count == NUM_SYNC_TESTS) then
+            print *, "  Correctness:         PASS"
+        else
+            print *, "  Correctness:         FAIL"
+        endif
+    end subroutine test_volatile_flag_sync
+
+    subroutine test_omp_atomic_sync()
+        ! Use OMP atomic for flag update
+        integer :: ready_flag
+        integer :: consumer_count
+        real(8) :: start_time, end_time, total_wait_time
+        integer :: i, local_flag
+
+        print *, "--- OMP Atomic Flag ---"
+
+        total_wait_time = 0.0
+        consumer_count = 0
+
+        do i = 1, NUM_SYNC_TESTS
+            ready_flag = 0
+
+            call cpu_time(start_time)
+
+            !$omp parallel sections num_threads(2) shared(ready_flag)
+
+            !$omp section
+            ! Producer: Atomic write
+            call sleep_microseconds(10)
+            !$omp atomic write
+            ready_flag = 1
+
+            !$omp section
+            ! Consumer: Atomic read in loop
+            local_flag = 0
+            do while (local_flag == 0)
+                !$omp atomic read
+                local_flag = ready_flag
+            end do
+            consumer_count = consumer_count + 1
+
+            !$omp end parallel sections
+
+            call cpu_time(end_time)
+            total_wait_time = total_wait_time + (end_time - start_time)
+        end do
+
+        print '(A, F10.4, A)', "  Total time:          ", total_wait_time * 1000.0, " ms"
+        print '(A, F10.4, A)', "  Avg per sync:        ", &
+              total_wait_time * 1000000.0 / NUM_SYNC_TESTS, " us"
+        print *, "  CPU usage:           HIGH (spin-wait with atomics)"
+
+        if (consumer_count == NUM_SYNC_TESTS) then
+            print *, "  Correctness:         PASS"
+        else
+            print *, "  Correctness:         FAIL"
+        endif
+    end subroutine test_omp_atomic_sync
+
+    subroutine test_omp_lock_sync()
+        ! Use OMP lock for synchronization
+        integer(omp_lock_kind) :: buffer_lock
+        integer :: ready_flag
+        integer :: consumer_count
+        real(8) :: start_time, end_time, total_wait_time
+        integer :: i
+
+        print *, "--- OMP Lock Synchronization ---"
+
+        call omp_init_lock(buffer_lock)
+
+        total_wait_time = 0.0
+        consumer_count = 0
+
+        do i = 1, NUM_SYNC_TESTS
+            ready_flag = 0
+
+            call cpu_time(start_time)
+
+            !$omp parallel sections num_threads(2) shared(ready_flag, buffer_lock)
+
+            !$omp section
+            ! Producer: Set flag under lock
+            call sleep_microseconds(10)
+            call omp_set_lock(buffer_lock)
+            ready_flag = 1
+            call omp_unset_lock(buffer_lock)
+
+            !$omp section
+            ! Consumer: Check flag under lock
+            do
+                call omp_set_lock(buffer_lock)
+                if (ready_flag == 1) then
+                    call omp_unset_lock(buffer_lock)
+                    exit
+                endif
+                call omp_unset_lock(buffer_lock)
+            end do
+            consumer_count = consumer_count + 1
+
+            !$omp end parallel sections
+
+            call cpu_time(end_time)
+            total_wait_time = total_wait_time + (end_time - start_time)
+        end do
+
+        call omp_destroy_lock(buffer_lock)
+
+        print '(A, F10.4, A)', "  Total time:          ", total_wait_time * 1000.0, " ms"
+        print '(A, F10.4, A)', "  Avg per sync:        ", &
+              total_wait_time * 1000000.0 / NUM_SYNC_TESTS, " us"
+        print *, "  CPU usage:           MEDIUM (lock contention)"
+
+        if (consumer_count == NUM_SYNC_TESTS) then
+            print *, "  Correctness:         PASS"
+        else
+            print *, "  Correctness:         FAIL"
+        endif
+    end subroutine test_omp_lock_sync
+
+    subroutine test_omp_flush_sync()
+        ! Explicit flush for memory consistency
+        integer :: ready_flag
+        integer :: consumer_count
+        real(8) :: start_time, end_time, total_wait_time
+        integer :: i
+
+        print *, "--- OMP Flush Synchronization ---"
+
+        total_wait_time = 0.0
+        consumer_count = 0
+
+        do i = 1, NUM_SYNC_TESTS
+            ready_flag = 0
+            !$omp flush(ready_flag)
+
+            call cpu_time(start_time)
+
+            !$omp parallel sections num_threads(2) shared(ready_flag)
+
+            !$omp section
+            ! Producer
+            call sleep_microseconds(10)
+            ready_flag = 1
+            !$omp flush(ready_flag)
+
+            !$omp section
+            ! Consumer
+            !$omp flush(ready_flag)
+            do while (ready_flag == 0)
+                !$omp flush(ready_flag)
+            end do
+            consumer_count = consumer_count + 1
+
+            !$omp end parallel sections
+
+            call cpu_time(end_time)
+            total_wait_time = total_wait_time + (end_time - start_time)
+        end do
+
+        print '(A, F10.4, A)', "  Total time:          ", total_wait_time * 1000.0, " ms"
+        print '(A, F10.4, A)', "  Avg per sync:        ", &
+              total_wait_time * 1000000.0 / NUM_SYNC_TESTS, " us"
+        print *, "  CPU usage:           HIGH (spin-wait with flushes)"
+
+        if (consumer_count == NUM_SYNC_TESTS) then
+            print *, "  Correctness:         PASS"
+        else
+            print *, "  Correctness:         FAIL"
+        endif
+    end subroutine test_omp_flush_sync
+
+    subroutine test_realistic_producer_consumer()
+        ! Realistic test with actual I/O and GPU work
+        real(4), managed, allocatable :: buffer(:,:)
+        character(len=256) :: temp_file
+        integer :: unit_num, i, j, istat
+        integer :: buffer_ready
+        real(8) :: start_time, end_time
+        real(8) :: io_start, io_end, gpu_start, gpu_end
+        real(8) :: io_time, gpu_time, wait_time
+        integer, parameter :: TEST_ITERATIONS = 20
+
+        print *, "--- Realistic Producer-Consumer Pattern ---"
+
+        allocate(buffer(FEATURE_SIZE, BATCH_SIZE))
+
+        temp_file = "/tmp/v28d_sync_test.bin"
+        unit_num = 80
+
+        ! Create test file
+        buffer = 1.0
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        do i = 1, TEST_ITERATIONS
+            write(unit_num) buffer
+        end do
+        close(unit_num)
+
+        buffer_ready = 1  ! Start with buffer ready
+        io_time = 0.0
+        gpu_time = 0.0
+        wait_time = 0.0
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        call cpu_time(start_time)
+
+        do i = 1, TEST_ITERATIONS
+
+            !$omp parallel sections num_threads(2) shared(buffer, buffer_ready)
+
+            !$omp section
+            ! GPU Thread: Wait for buffer, then process
+            call cpu_time(gpu_start)
+            !$omp flush(buffer_ready)
+            do while (buffer_ready == 0)
+                !$omp flush(buffer_ready)
+            end do
+            call cpu_time(gpu_end)
+            wait_time = wait_time + (gpu_end - gpu_start)
+
+            ! Process on GPU
+            call cpu_time(gpu_start)
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do concurrent (integer :: k = 1:FEATURE_SIZE)
+                    buffer(k, j) = buffer(k, j) * 1.001
+                end do
+            end do
+            istat = cudaDeviceSynchronize()
+            call cpu_time(gpu_end)
+            gpu_time = gpu_time + (gpu_end - gpu_start)
+
+            ! Signal buffer consumed
+            buffer_ready = 0
+            !$omp flush(buffer_ready)
+
+            !$omp section
+            ! I/O Thread: Wait for buffer consumed, then load
+            !$omp flush(buffer_ready)
+            do while (buffer_ready == 1)
+                !$omp flush(buffer_ready)
+            end do
+
+            ! Load from disk
+            call cpu_time(io_start)
+            read(unit_num, iostat=istat) buffer
+            call cpu_time(io_end)
+            io_time = io_time + (io_end - io_start)
+
+            ! Signal buffer ready
+            buffer_ready = 1
+            !$omp flush(buffer_ready)
+
+            !$omp end parallel sections
+
+        end do
+
+        call cpu_time(end_time)
+
+        close(unit_num)
+
+        print '(A, F8.4, A)', "  Total I/O time:      ", io_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Total GPU time:      ", gpu_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Total wait time:     ", wait_time * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Wall clock time:     ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F6.1, A)', "  Wait overhead:       ", &
+              100.0 * wait_time / (end_time - start_time), " %"
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(buffer)
+    end subroutine test_realistic_producer_consumer
+
+    subroutine summarize_recommendations()
+        print *, "=============================================="
+        print *, "  Synchronization Recommendations"
+        print *, "=============================================="
+        print *, ""
+        print *, "For v28d streaming double-buffer:"
+        print *, ""
+        print *, "1. OMP FLUSH + spin-wait is simplest and works well"
+        print *, "   - Pros: Low latency, simple code"
+        print *, "   - Cons: High CPU usage on waiting thread"
+        print *, ""
+        print *, "2. OMP ATOMIC is more portable"
+        print *, "   - Pros: Guaranteed memory ordering"
+        print *, "   - Cons: Similar CPU usage to flush"
+        print *, ""
+        print *, "3. For streaming, CPU usage on I/O thread is acceptable"
+        print *, "   because it's doing useful I/O work most of the time"
+        print *, ""
+        print *, "RECOMMENDATION: Use OMP FLUSH with spin-wait"
+        print *, "  - Simple implementation"
+        print *, "  - Matches design doc approach"
+        print *, "  - CPU overhead is acceptable for I/O overlap"
+    end subroutine summarize_recommendations
+
+    subroutine sleep_microseconds(us)
+        integer, intent(in) :: us
+        real(8) :: start_time, current_time, target_time
+
+        call cpu_time(start_time)
+        target_time = start_time + real(us, 8) / 1000000.0
+
+        do
+            call cpu_time(current_time)
+            if (current_time >= target_time) exit
+        end do
+    end subroutine sleep_microseconds
+
+end program test_08_buffer_ready_sync

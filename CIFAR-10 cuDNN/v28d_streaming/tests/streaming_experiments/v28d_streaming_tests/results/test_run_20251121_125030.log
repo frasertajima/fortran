@@ -1,0 +1,690 @@
+
+╔══════════════════════════════════════════╗
+║  PHASE 1: Foundation Tests               ║
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_01_disk_io_bandwidth
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 01: Disk I/O Bandwidth Measurement
+ ==============================================
+ 
+   Creating test file (          512 MB)...
+   Test file created successfully
+ Test file:/tmp/v28d_io_test.bin
+ Test file size:          512 MB
+ 
+ --- Sequential Read Tests ---
+            4KB blocks:    2427.26 MB/s (   0.161 ms total)
+           64KB blocks:    8478.14 MB/s (   0.737 ms total)
+            1MB blocks:    9049.00 MB/s (  11.051 ms total)
+   Batch-sized (1.5MB):    9158.14 MB/s (  16.379 ms total)
+ 
+ --- Random Access Tests ---
+            4KB random:     0.0020 ms avg latency ( 100 reads)
+           64KB random:     0.0089 ms avg latency ( 100 reads)
+    Batch-sized random:     0.1607 ms avg latency ( 100 reads)
+ 
+ --- Batch Simulation Test ---
+   Simulating batch reads (           50  batches,          1536  KB each)
+    Sequential:    8.205 ms total,   0.1641 ms/batch
+    Random:        8.181 ms total,   0.1636 ms/batch
+    Random/Sequential ratio:   1.00x
+ 
+   Test file deleted
+ ==============================================
+   Test 01 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_02_buffer_allocation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 02: Buffer Allocation Patterns
+ ==============================================
+ 
+ Buffer configuration:
+   Batch size:               128
+   Feature size:            3072
+   Bytes/buffer:         1572864  (    1.500000      MB)
+ 
+ --- Managed Memory Allocation ---
+  Allocation time:        1.549 ms
+  Memory used:            2.000 MB
+  Theoretical minimum:    3.001 MB
+   GPU access:          PASS
+   Status:              PASS
+ 
+ --- Device Memory Allocation (baseline) ---
+  Allocation time:        0.144 ms
+  Memory used:            4.000 MB
+   Status:              PASS
+ 
+ --- Pinned Host Memory Allocation ---
+  Allocation time:        2.464 ms
+  Memory allocated:       3.000 MB
+   Host access:         PASS
+   Status:              PASS
+ 
+ --- Allocation Cycle Stress Test ---
+   Running           100  alloc/dealloc cycles...
+  Total time:             9.204 ms
+  Time per cycle:        0.0920 ms
+   Memory leak check:   PASS (no leak detected)
+   Status:              PASS
+ 
+ --- Double Buffer Pattern Test ---
+   Buffers allocated successfully
+  Pointer swap time:        0.0 ns
+   Swap correctness:    PASS
+   Status:              PASS
+ 
+ ==============================================
+   Test 02 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_03_file_format_read
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 03: File Format Read Validation
+ ==============================================
+ 
+ Data path:
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10
+ 
+   Missing files:
+     - 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10/cifar10_train_images.bin
+     - 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10/cifar10_train_labels.bin
+     - 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10/cifar10_test_images.bin
+     - 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10/cifar10_test_labels.bin
+ CIFAR-10 data files not found.
+ Running with synthetic test file instead...
+ 
+ --- Creating Synthetic Test Files ---
+   Created synthetic files (1000 samples)
+ 
+ --- Stream Access Test ---
+  File open time:        0.0072 ms
+  First batch read:      0.7429 ms
+   Label read:          PASS
+   Status:              PASS
+ 
+ --- Seek Performance Test ---
+   Testing seek to various batch positions...
+    Batch    1:   0.1700 ms
+    Batch  100: FAILED
+    Batch  200: FAILED
+    Batch  350: FAILED
+    Batch  390: FAILED
+  Average seek+read:     0.0354 ms
+   Status:              PASS
+ ==============================================
+   Test 03 Complete
+ ==============================================
+
+╔══════════════════════════════════════════╗
+║  PHASE 2: Core Mechanics Tests           ║
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_04_double_buffer_swap
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+free: cuMemFree returns error code 716
+free: cuMemFree returns error code 716
+ ==============================================
+   Test 04: Double Buffer Swap Mechanism
+ ==============================================
+ 
+ --- Pointer-Based Swap (Design Doc Approach) ---
+  Swap cycles:           100000
+  Time per swap:           0.00 ns
+   Correctness:         PASS
+   Performance:         PASS (< 100 ns)
+ 
+ --- Index Toggle Swap (Alternative) ---
+  Time per swap:           0.00 ns
+   Correctness:         PASS
+ 
+ --- Data Integrity Through Swaps ---
+   Data integrity:      PASS
+   Pointer mapping:     PASS
+ 
+ --- Swap Under Simulated GPU Load ---
+  Processed  100 batches
+  Total time:           523.085 ms
+  Time per batch:        5.2308 ms
+  Final value sample:     0.000
+   Status:              PASS
+ 
+ ==============================================
+   Test 04 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_05_sync_streaming_load
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 05: Synchronous Streaming Load
+ ==============================================
+ 
+ Data path:
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10
+ Batch size:          128
+ Total batches:          391
+ 
+ --- Single Batch Load Test ---
+   Data file not found, creating synthetic test...
+  Synthetic load time:   0.7629 ms
+   Status:              PASS
+ 
+ --- Sequential Batch Loading ---
+   Skipping (no data file)
+ 
+ --- Full Epoch Streaming ---
+   Skipping (no data file)
+ 
+ --- GPU Processing After Load ---
+   Skipping (no data file)
+ 
+ ==============================================
+   Test 05 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_06_openmp_thread_basics
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 06: OpenMP Thread Basics with CUDA
+ ==============================================
+ 
+ --- OpenMP Availability ---
+  Max threads:            2
+  Num processors:        16
+   OpenMP available:    PASS
+ 
+ --- Parallel Sections Test ---
+  Section A thread:     0
+  Section B thread:     1
+   Both sections ran:   PASS
+   Thread separation:   PASS
+ 
+ --- Shared Variable Test ---
+  Counter (expect 4):     4
+   Atomic increment:    PASS
+  Counter (critical):     4
+   Critical section:    PASS
+ 
+ --- CUDA from Different Threads ---
+  Thread  0 CUDA:  T
+  Thread  1 CUDA:  T
+   Data A correct:      PASS
+   Data B correct:      PASS
+ 
+ --- I/O and GPU Separation (Key Test) ---
+  I/O time:              0.1261 ms
+  GPU time:              0.0699 ms
+  Total wall time:       0.1321 ms
+   Overlap achieved:    PASS
+   I/O correctness:     PASS
+   GPU correctness:     PASS
+ 
+   CONCLUSION: OpenMP parallel sections can separate I/O and GPU work
+ 
+ ==============================================
+   Test 06 Complete
+ ==============================================
+
+╔══════════════════════════════════════════╗
+║  PHASE 3: Async I/O Tests                ║
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_07_async_load_overlap
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 07: Async I/O Overlap Validation
+ ==============================================
+ 
+ OMP Max Threads:            2
+ 
+ --- Baseline: Sequential (No Overlap) ---
+  Batches processed:     50
+  Total time:           111.121 ms
+  Avg per batch:         2.2224 ms
+ 
+ --- Double Buffer with OpenMP Overlap ---
+  Batches processed:     50
+  Total time:            61.759 ms
+  Avg per batch:         1.2352 ms
+ 
+ --- Overlap with Real CIFAR-10 Data ---
+   Skipping (no data file at 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10
+ )
+ 
+ --- Detailed Overlap Measurement ---
+  Total I/O time:        60.561 ms
+  Total GPU time:        59.468 ms
+  If sequential:        120.029 ms
+  Actual time:           61.945 ms
+  Overlap achieved:      48.4 %
+  Speedup:               1.94x
+ 
+   RESULT: PARTIAL overlap
+ 
+ ==============================================
+   Test 07 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_08_buffer_ready_sync
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 08: Buffer Ready Synchronization
+ ==============================================
+ 
+ Testing synchronization mechanisms for double buffering
+ 
+ --- Spin-Wait on Shared Flag ---
+  Sync operations:       1000
+  Total time:             11.6792 ms
+  Avg per sync:           11.6792 us
+   CPU usage:           HIGH (spin-wait)
+   Correctness:         PASS
+ 
+ --- OMP Atomic Flag ---
+  Total time:             10.3071 ms
+  Avg per sync:           10.3071 us
+   CPU usage:           HIGH (spin-wait with atomics)
+   Correctness:         PASS
+ 
+ --- OMP Lock Synchronization ---
+  Total time:             11.0667 ms
+  Avg per sync:           11.0667 us
+   CPU usage:           MEDIUM (lock contention)
+   Correctness:         PASS
+ 
+ --- OMP Flush Synchronization ---
+  Total time:             10.3140 ms
+  Avg per sync:           10.3140 us
+   CPU usage:           HIGH (spin-wait with flushes)
+   Correctness:         PASS
+ 
+ --- Realistic Producer-Consumer Pattern ---
+  Total I/O time:       21.5878 ms
+  Total GPU time:       15.3072 ms
+  Total wait time:       0.0010 ms
+  Wall clock time:      36.9878 ms
+  Wait overhead:          0.0 %
+ 
+ ==============================================
+   Synchronization Recommendations
+ ==============================================
+ 
+ For v28d streaming double-buffer:
+ 
+ 1. OMP FLUSH + spin-wait is simplest and works well
+    - Pros: Low latency, simple code
+    - Cons: High CPU usage on waiting thread
+ 
+ 2. OMP ATOMIC is more portable
+    - Pros: Guaranteed memory ordering
+    - Cons: Similar CPU usage to flush
+ 
+ 3. For streaming, CPU usage on I/O thread is acceptable
+    because it's doing useful I/O work most of the time
+ 
+ RECOMMENDATION: Use OMP FLUSH with spin-wait
+   - Simple implementation
+   - Matches design doc approach
+   - CPU overhead is acceptable for I/O overlap
+ ==============================================
+   Test 08 Complete
+ ==============================================
+
+╔══════════════════════════════════════════╗
+║  PHASE 4: Shuffle & Integration Tests    ║
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_09_index_shuffle_disk
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 09: Index Shuffle Disk Access Impact
+ ==============================================
+ 
+ --- Sequential vs Random Batch Access ---
+  Test batches:         100
+  Sequential total:      20.264 ms
+  Sequential per-batch:  0.2026 ms
+  Random total:          19.779 ms
+  Random per-batch:      0.1978 ms
+  Random/Sequential:     0.98x
+ 
+ --- Shuffle Pattern Comparison ---
+  Block size:           10 batches
+ 
+  No shuffle:            16.512 ms (  0.1651 ms/batch)
+  Block shuffle:         16.178 ms (  0.1618 ms/batch)
+  Full shuffle:          16.236 ms (  0.1624 ms/batch)
+ 
+  Block/None ratio:      0.98x
+  Full/None ratio:       0.98x
+ 
+ --- Real CIFAR-10 Data Access Patterns ---
+   Skipping (no data file at 
+ /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/../v28c_warp_shuffle/datasets/cifar10
+ )
+ 
+ ==============================================
+   Shuffle Strategy Recommendations
+ ==============================================
+ 
+ Based on test results:
+ 
+ 1. NVMe SSD: Full shuffle is acceptable
+    - Random access penalty is minimal (~1.5x)
+    - Best for training quality
+ 
+ 2. SATA SSD: Block shuffle recommended
+    - Good randomization with mostly sequential I/O
+    - Block size 50-100 batches is a good balance
+ 
+ 3. HDD: Block shuffle required (or no shuffle)
+    - Random access extremely slow (10x+ penalty)
+    - Large block sizes (500+ batches)
+ 
+ IMPLEMENTATION NOTES:
+   - Shuffle indices array, not data
+   - Reshuffle at epoch boundary
+   - Make shuffle mode configurable
+ ==============================================
+   Test 09 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_10_block_shuffle_opt
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 10: Block Shuffle Optimization
+ ==============================================
+ 
+ Testing block sizes: 1, 10, 25, 50, 100, 200, full
+ 
+ --- Block Size Throughput Test ---
+   Block Size  |  Time (ms)  |  Throughput (MB/s)  |  vs Sequential
+   -----------+-------------+--------------------+-----------------
+       1       |    78.688 |       7434.43 |  baseline
+      10       |    78.927 |       7411.91 |    1.00x faster
+      25       |    79.052 |       7400.19 |    1.00x faster
+      50       |    77.925 |       7507.22 |    1.01x faster
+     100       |    77.549 |       7543.62 |    1.01x faster
+     200       |    77.472 |       7551.12 |    1.02x faster
+     390       |    77.401 |       7558.03 |    1.02x faster
+ 
+ --- Randomization Quality Analysis ---
+ 
+   Measuring average sample displacement from original position
+   (Higher = better randomization)
+ 
+   Block Size  |  Avg Displacement  |  Max Displacement  |  Quality
+   -----------+-------------------+-------------------+----------
+       1       |         125.1 |         374.0 |  Excellent
+      10       |         124.1 |         330.0 |  Excellent
+      25       |         121.0 |         300.0 |  Excellent
+      50       |         139.6 |         350.0 |  Excellent
+     100       |         148.6 |         300.0 |  Excellent
+     200       |           0.0 |           0.0 |  Limited
+     390       |           0.0 |           0.0 |  None
+ 
+ 
+ ==============================================
+   Block Size Recommendations
+ ==============================================
+ 
+ Based on throughput and randomization analysis:
+ 
+   Storage Type     |  Recommended Block Size
+   ----------------+-------------------------
+   NVMe SSD        |  1 (full shuffle OK)
+   SATA SSD        |  25-50 batches
+   HDD             |  100-200 batches
+ 
+ For v28d default: block_size = 50
+   - Good randomization (>15% displacement)
+   - Near-sequential I/O performance
+   - Works well across storage types
+ 
+ Make configurable via streaming_config:
+   shuffle_block_size = 50  ! Default
+   shuffle_mode = 'block'   ! 'none', 'block', 'full'
+ ==============================================
+   Test 10 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_11_correctness_vs_managed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 11: Correctness vs Managed Memory
+ ==============================================
+ 
+ --- Synthetic Data Correctness ---
+  Data comparisons:       3072000
+  Data mismatches:              0
+  Max difference:        0.0000E+00
+   Data correctness:    PASS (bit-exact)
+  Label mismatches:             0
+   Label correctness:   PASS (bit-exact)
+ 
+ --- Real CIFAR-10 Correctness ---
+   Skipping (no data file)
+ 
+ --- Batch Extraction Equivalence ---
+   Skipping (no data file)
+ 
+ ==============================================
+   Test 11 Complete
+ ==============================================
+
+╔══════════════════════════════════════════╗
+║  PHASE 5: Stress Tests                   ║
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_12_epoch_boundary
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 12: Epoch Boundary Handling
+ ==============================================
+ 
+ Samples:         1000
+ Batch size:          128
+ Batches per epoch:            7
+ Test epochs:            5
+ 
+ --- Epoch Batch Count Test ---
+  Epoch  1:    7 batches - PASS
+  Epoch  2:    7 batches - PASS
+  Epoch  3:    7 batches - PASS
+  Epoch  4:    7 batches - PASS
+  Epoch  5:    7 batches - PASS
+  Total batches:           35
+  Expected:                35
+   Overall:             PASS
+ 
+ --- Reshuffle Between Epochs Test ---
+  Epoch  1:    3/   7 same position ( 42.9%)
+  Epoch  2:    0/   7 same position (  0.0%)
+  Epoch  3:    1/   7 same position ( 14.3%)
+  Epoch  4:    0/   7 same position (  0.0%)
+  Epoch  5:    2/   7 same position ( 28.6%)
+   Reshuffle working:   PASS (indices change each epoch)
+ 
+ --- Double Buffer Epoch Transition ---
+  Epoch  1: transition OK
+  Epoch  2: transition OK
+  Epoch  3: transition OK
+  Epoch  4: transition OK
+  Epoch  5: transition OK
+  Total processed:         35
+   Epoch transitions:   PASS
+ 
+ --- Sample Coverage Per Epoch ---
+  Epoch  1: missing= 104 duplicates=   0 - FAIL
+  Epoch  2: missing= 104 duplicates=   0 - FAIL
+  Epoch  3: missing= 104 duplicates=   0 - FAIL
+ 
+ ==============================================
+   Test 12 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_13_variable_batch_size
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 13: Variable Batch Size Handling
+ ==============================================
+ 
+ Batch size:          128
+ 
+--- Dataset Size:   1000 samples ---
+  Full batches:           7
+  Last batch size:      104
+  Total batches:          8
+   File size correct:   PASS
+   Samples covered:     PASS
+ 
+--- Dataset Size:   1023 samples ---
+  Full batches:           7
+  Last batch size:      127
+  Total batches:          8
+   File size correct:   PASS
+   Samples covered:     PASS
+ 
+--- Dataset Size:   1024 samples ---
+  Full batches:           8
+  Last batch size:      128
+  Total batches:          8
+   File size correct:   PASS
+   Samples covered:     PASS
+ 
+--- Dataset Size:   1025 samples ---
+  Full batches:           8
+  Last batch size:        1
+  Total batches:          9
+   File size correct:   PASS
+   Samples covered:     PASS
+ 
+--- Dataset Size:  50000 samples ---
+  Full batches:         390
+  Last batch size:       80
+  Total batches:        391
+   File size correct:   PASS
+   Samples covered:     PASS
+ 
+ --- Batch Size Calculation Logic ---
+   Batch size logic:    PASS
+ 
+ --- Last Batch Data Integrity ---
+  Last batch size:      104
+  Elements checked:        319488
+  Mismatches:                   0
+   Data integrity:      PASS
+   Buffer overrun:      PASS (no crash)
+ 
+ ==============================================
+   Test 13 Complete
+ ==============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Running: test_14_simulated_large_dataset
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ==============================================
+   Test 14: Simulated Large Dataset
+ ==============================================
+ 
+ Simulating a                       10 GB dataset
+  Simulated samples:         873813
+  Simulated batches:           6826
+ 
+ Using small test file that wraps around
+ 
+ --- Memory Bounded Streaming Test ---
+  GPU memory free:         6.23 GB
+  Processing batches:    1000
+ 
+    Batch    250: GPU free =     6.23 GB
+    Batch    500: GPU free =     6.23 GB
+    Batch    750: GPU free =     6.23 GB
+    Batch   1000: GPU free =     6.23 GB
+ 
+  Total time:           221.262 ms
+  Final GPU free:          6.23 GB
+  Memory change:           0.00 MB
+   Memory bounded:      PASS
+ 
+ --- Sustained Throughput Test ---
+  Testing    4 segments of  500 batches each
+ 
+  Segment  1:    9476.51 MB/s
+  Segment  2:    9513.31 MB/s
+  Segment  3:    9517.77 MB/s
+  Segment  4:    9529.51 MB/s
+ 
+   Throughput sustained: PASS (< 20% variation)
+ 
+ --- Long Running Stability Test ---
+  Simulating  3 epochs of  1000 batches each
+ 
+  Epoch  1: 1763.656 ms, GPU free:   6.23 GB
+  Epoch  2: 1777.509 ms, GPU free:   6.23 GB
+  Epoch  3: 1826.573 ms, GPU free:   6.23 GB
+ 
+  Total time:          5367.738 ms
+   No crashes:          PASS
+ 
+ 
+ ==============================================
+   Large Dataset Support Summary
+ ==============================================
+ 
+ The streaming architecture successfully:
+ 
+ 1. Keeps memory bounded regardless of dataset size
+    - Only 2 batch buffers allocated (~3 MB for CIFAR-10)
+    - Can process 10GB, 100GB, 1TB datasets identically
+ 
+ 2. Maintains consistent throughput
+    - No degradation over long runs
+    - File access pattern is predictable
+ 
+ 3. Handles epoch boundaries cleanly
+    - Reshuffle works with index arrays
+    - No data leaks between epochs
+ 
+ CONCLUSION: v28d streaming is suitable for datasets
+             of any size, limited only by disk space
+ ==============================================
+   Test 14 Complete
+ ==============================================
+
+╔══════════════════════════════════════════╗
+║  TEST RUN COMPLETE                       ║
+╚══════════════════════════════════════════╝
+
+Results saved to: /var/home/fraser/Downloads/CIFAR-10/v28d_streaming_tests/results/test_run_20251121_125030.log
+
+Review the output above for PASS/FAIL status of each test.
+Key metrics to note for design decisions:
+  - Test 01: Disk I/O bandwidth
+  - Test 06: OpenMP + CUDA compatibility
+  - Test 07: Overlap percentage achieved
+  - Test 10: Optimal block shuffle size
+

@@ -1,0 +1,342 @@
+! test_11_correctness_vs_managed.cuf - Verify streaming matches managed memory
+! Purpose: Confirm streaming is a drop-in replacement
+!
+! Compile: nvfortran -cuda -O3 -o test_11_correctness_vs_managed test_11_correctness_vs_managed.cuf
+! Run: ./test_11_correctness_vs_managed [path_to_data]
+!
+! Expected results:
+!   - Data match: 100% bit-exact
+!   - Label match: 100%
+!   - Streaming is transparent replacement
+
+program test_11_correctness_vs_managed
+    use cudafor
+    implicit none
+
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+    integer, parameter :: NUM_SAMPLES = 50000
+    integer, parameter :: NUM_BATCHES = NUM_SAMPLES / BATCH_SIZE
+    integer, parameter :: TEST_BATCHES = 10
+
+    character(len=512) :: data_path
+    integer :: num_args
+
+    print *, "=============================================="
+    print *, "  Test 11: Correctness vs Managed Memory"
+    print *, "=============================================="
+    print *, ""
+
+    num_args = command_argument_count()
+    if (num_args >= 1) then
+        call get_command_argument(1, data_path)
+    else
+        data_path = "../v28c_warp_shuffle/datasets/cifar10"
+    endif
+
+    call test_synthetic_correctness()
+    print *, ""
+
+    call test_real_data_correctness(data_path)
+    print *, ""
+
+    call test_batch_extraction_equivalence(data_path)
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 11 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_synthetic_correctness()
+        ! Create synthetic data, load both ways, compare
+        real(4), managed, allocatable :: managed_data(:,:)
+        integer, managed, allocatable :: managed_labels(:)
+        real(4), allocatable :: streamed_data(:,:)
+        integer, allocatable :: streamed_labels(:)
+        character(len=256) :: data_file, label_file
+        integer :: data_unit, label_unit, i, j
+        integer :: mismatches
+        real(8) :: max_diff
+
+        print *, "--- Synthetic Data Correctness ---"
+
+        allocate(managed_data(FEATURE_SIZE, 1000))
+        allocate(managed_labels(1000))
+        allocate(streamed_data(FEATURE_SIZE, 1000))
+        allocate(streamed_labels(1000))
+
+        ! Create known data pattern
+        do j = 1, 1000
+            do i = 1, FEATURE_SIZE
+                managed_data(i, j) = real(mod(i * 7 + j * 13, 256)) / 255.0
+            end do
+            managed_labels(j) = mod(j - 1, 10)
+        end do
+
+        ! Write to disk
+        data_file = "/tmp/v28d_correct_data.bin"
+        label_file = "/tmp/v28d_correct_labels.bin"
+
+        data_unit = 110
+        label_unit = 111
+
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='replace')
+        write(data_unit) managed_data
+        close(data_unit)
+
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='replace')
+        write(label_unit) managed_labels
+        close(label_unit)
+
+        ! Read back via streaming
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        read(data_unit) streamed_data
+        close(data_unit)
+
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old')
+        read(label_unit) streamed_labels
+        close(label_unit)
+
+        ! Compare
+        mismatches = 0
+        max_diff = 0.0
+
+        do j = 1, 1000
+            do i = 1, FEATURE_SIZE
+                if (managed_data(i, j) /= streamed_data(i, j)) then
+                    mismatches = mismatches + 1
+                    max_diff = max(max_diff, abs(managed_data(i, j) - streamed_data(i, j)))
+                endif
+            end do
+        end do
+
+        print '(A, I10)', "  Data comparisons:    ", 1000 * FEATURE_SIZE
+        print '(A, I10)', "  Data mismatches:     ", mismatches
+        print '(A, E12.4)', "  Max difference:      ", max_diff
+
+        if (mismatches == 0) then
+            print *, "  Data correctness:    PASS (bit-exact)"
+        else
+            print *, "  Data correctness:    FAIL"
+        endif
+
+        ! Compare labels
+        mismatches = 0
+        do i = 1, 1000
+            if (managed_labels(i) /= streamed_labels(i)) mismatches = mismatches + 1
+        end do
+
+        print '(A, I10)', "  Label mismatches:    ", mismatches
+
+        if (mismatches == 0) then
+            print *, "  Label correctness:   PASS (bit-exact)"
+        else
+            print *, "  Label correctness:   FAIL"
+        endif
+
+        ! Cleanup
+        open(unit=data_unit, file=data_file, status='old')
+        close(data_unit, status='delete')
+        open(unit=label_unit, file=label_file, status='old')
+        close(label_unit, status='delete')
+
+        deallocate(managed_data, managed_labels)
+        deallocate(streamed_data, streamed_labels)
+    end subroutine test_synthetic_correctness
+
+    subroutine test_real_data_correctness(data_path)
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file, label_file
+        real(4), managed, allocatable :: full_data(:,:)
+        integer, managed, allocatable :: full_labels(:)
+        real(4), allocatable :: batch_data(:,:)
+        integer, allocatable :: batch_labels(:)
+        integer :: data_unit, label_unit, batch
+        integer(8) :: data_pos, label_pos, bytes_per_sample
+        integer :: i, j, idx, mismatches
+        real(8) :: max_diff
+        logical :: file_exists
+
+        print *, "--- Real CIFAR-10 Correctness ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        inquire(file=data_file, exist=file_exists)
+
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file)"
+            return
+        endif
+
+        label_file = trim(data_path) // "/cifar10_train_labels.bin"
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        ! Load full dataset into managed memory (v28b/v28c style)
+        print *, "  Loading full dataset into managed memory..."
+        allocate(full_data(FEATURE_SIZE, NUM_SAMPLES))
+        allocate(full_labels(NUM_SAMPLES))
+
+        data_unit = 112
+        label_unit = 113
+
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        read(data_unit) full_data
+        close(data_unit)
+
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old')
+        read(label_unit) full_labels
+        close(label_unit)
+
+        print *, "  Full dataset loaded"
+
+        ! Now stream individual batches and compare
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(batch_labels(BATCH_SIZE))
+
+        mismatches = 0
+        max_diff = 0.0
+
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        open(unit=label_unit, file=label_file, form='unformatted', &
+             access='stream', status='old')
+
+        print '(A, I3, A)', "  Comparing ", TEST_BATCHES, " batches..."
+
+        do batch = 1, TEST_BATCHES
+            ! Calculate position
+            data_pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+            label_pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * 4 + 1
+
+            ! Stream batch
+            read(data_unit, pos=data_pos) batch_data
+            read(label_unit, pos=label_pos) batch_labels
+
+            ! Compare to managed memory
+            do i = 1, BATCH_SIZE
+                idx = (batch - 1) * BATCH_SIZE + i
+
+                ! Compare labels
+                if (batch_labels(i) /= full_labels(idx)) then
+                    mismatches = mismatches + 1
+                endif
+
+                ! Compare data
+                do j = 1, FEATURE_SIZE
+                    if (batch_data(j, i) /= full_data(j, idx)) then
+                        mismatches = mismatches + 1
+                        max_diff = max(max_diff, abs(batch_data(j, i) - full_data(j, idx)))
+                    endif
+                end do
+            end do
+        end do
+
+        close(data_unit)
+        close(label_unit)
+
+        print '(A, I10)', "  Total comparisons:   ", TEST_BATCHES * BATCH_SIZE * (FEATURE_SIZE + 1)
+        print '(A, I10)', "  Mismatches:          ", mismatches
+
+        if (mismatches == 0) then
+            print *, "  Result:              PASS (streaming matches managed)"
+        else
+            print *, "  Result:              FAIL"
+            print '(A, E12.4)', "  Max difference:      ", max_diff
+        endif
+
+        deallocate(full_data, full_labels)
+        deallocate(batch_data, batch_labels)
+    end subroutine test_real_data_correctness
+
+    subroutine test_batch_extraction_equivalence(data_path)
+        ! Test that batch extraction gives same results both ways
+        character(len=*), intent(in) :: data_path
+
+        character(len=512) :: data_file
+        real(4), managed, allocatable :: managed_train(:,:)
+        real(4), device, allocatable :: managed_batch(:,:)
+        real(4), managed, allocatable :: streamed_batch(:,:)
+        integer :: data_unit, batch_idx, i, j, istat
+        integer(8) :: pos, bytes_per_sample
+        integer :: mismatches
+        logical :: file_exists
+
+        print *, "--- Batch Extraction Equivalence ---"
+
+        data_file = trim(data_path) // "/cifar10_train_images.bin"
+        inquire(file=data_file, exist=file_exists)
+
+        if (.not. file_exists) then
+            print *, "  Skipping (no data file)"
+            return
+        endif
+
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        ! Method 1: Load all into managed, extract batch (v28b/v28c style)
+        allocate(managed_train(FEATURE_SIZE, NUM_SAMPLES))
+        allocate(managed_batch(FEATURE_SIZE, BATCH_SIZE))
+        allocate(streamed_batch(FEATURE_SIZE, BATCH_SIZE))
+
+        data_unit = 114
+        open(unit=data_unit, file=data_file, form='unformatted', &
+             access='stream', status='old')
+        read(data_unit) managed_train
+        close(data_unit)
+
+        ! Test several batches
+        print *, "  Testing batch extraction equivalence..."
+
+        mismatches = 0
+
+        do batch_idx = 1, TEST_BATCHES
+            ! Method 1: Extract from managed array (simulated GPU extraction)
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    managed_batch(i, j) = managed_train(i, (batch_idx-1)*BATCH_SIZE + j)
+                end do
+            end do
+            istat = cudaDeviceSynchronize()
+
+            ! Method 2: Stream directly from disk
+            open(unit=data_unit, file=data_file, form='unformatted', &
+                 access='stream', status='old')
+            pos = int(batch_idx - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+            read(data_unit, pos=pos) streamed_batch
+            close(data_unit)
+
+            ! Compare (need to copy device to host for comparison)
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    if (abs(managed_batch(i, j) - streamed_batch(i, j)) > 1e-6) then
+                        mismatches = mismatches + 1
+                    endif
+                end do
+            end do
+        end do
+
+        print '(A, I10)', "  Batches tested:      ", TEST_BATCHES
+        print '(A, I10)', "  Element mismatches:  ", mismatches
+
+        if (mismatches == 0) then
+            print *, "  Equivalence:         PASS"
+            print *, ""
+            print *, "  CONCLUSION: Streaming can replace managed memory"
+            print *, "              with identical batch contents"
+        else
+            print *, "  Equivalence:         FAIL"
+        endif
+
+        deallocate(managed_train, managed_batch, streamed_batch)
+    end subroutine test_batch_extraction_equivalence
+
+end program test_11_correctness_vs_managed

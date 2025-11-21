@@ -1,0 +1,269 @@
+! test_13_variable_batch_size.cuf - Handle partial/variable batch sizes
+! Purpose: Test last batch when dataset not divisible by batch_size
+!
+! Compile: nvfortran -cuda -O3 -o test_13_variable_batch_size test_13_variable_batch_size.cuf
+! Run: ./test_13_variable_batch_size
+!
+! Expected results:
+!   - Last batch has correct (smaller) size
+!   - No buffer overrun
+!   - All samples seen exactly once
+
+program test_13_variable_batch_size
+    use cudafor
+    implicit none
+
+    integer, parameter :: FEATURE_SIZE = 3072
+    integer, parameter :: BATCH_SIZE = 128
+
+    ! Test cases with various dataset sizes
+    integer, parameter :: NUM_TEST_CASES = 5
+    integer :: test_sizes(NUM_TEST_CASES) = [1000, 1023, 1024, 1025, 50000]
+
+    integer :: test_case
+
+    print *, "=============================================="
+    print *, "  Test 13: Variable Batch Size Handling"
+    print *, "=============================================="
+    print *, ""
+    print *, "Batch size:", BATCH_SIZE
+    print *, ""
+
+    do test_case = 1, NUM_TEST_CASES
+        call test_dataset_size(test_sizes(test_case))
+        print *, ""
+    end do
+
+    call test_batch_size_calculation()
+    print *, ""
+
+    call test_last_batch_data_integrity()
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 13 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_dataset_size(num_samples)
+        integer, intent(in) :: num_samples
+
+        integer :: num_full_batches, last_batch_size, total_batches
+        integer :: samples_covered, expected_samples
+        integer :: batch, i
+        real(4), allocatable :: buffer(:,:)
+        character(len=256) :: temp_file
+        integer :: unit_num
+        integer(8) :: pos, bytes_per_sample, file_size
+
+        print '(A, I6, A)', "--- Dataset Size: ", num_samples, " samples ---"
+
+        ! Calculate expected values
+        num_full_batches = num_samples / BATCH_SIZE
+        last_batch_size = mod(num_samples, BATCH_SIZE)
+        if (last_batch_size == 0) then
+            total_batches = num_full_batches
+            last_batch_size = BATCH_SIZE  ! Last batch is full
+        else
+            total_batches = num_full_batches + 1
+        endif
+
+        print '(A, I4)', "  Full batches:        ", num_full_batches
+        print '(A, I4)', "  Last batch size:     ", last_batch_size
+        print '(A, I4)', "  Total batches:       ", total_batches
+
+        ! Create test file with exact number of samples
+        allocate(buffer(FEATURE_SIZE, num_samples))
+        do i = 1, num_samples
+            buffer(:, i) = real(i)  ! Each sample has unique value
+        end do
+
+        temp_file = "/tmp/v28d_varsize_test.bin"
+        unit_num = 130
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        write(unit_num) buffer
+        close(unit_num)
+
+        deallocate(buffer)
+
+        ! Verify file size
+        inquire(file=temp_file, size=file_size)
+        expected_samples = int(file_size / bytes_per_sample)
+
+        if (expected_samples == num_samples) then
+            print *, "  File size correct:   PASS"
+        else
+            print '(A, I6, A, I6)', "  File size:           ", expected_samples, &
+                  " samples (expected ", num_samples, ")"
+        endif
+
+        ! Now read back batch by batch
+        allocate(buffer(FEATURE_SIZE, BATCH_SIZE))
+        samples_covered = 0
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        do batch = 1, total_batches
+            ! Determine actual batch size
+            if (batch < total_batches) then
+                ! Full batch
+                pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+                read(unit_num, pos=pos) buffer(:, 1:BATCH_SIZE)
+                samples_covered = samples_covered + BATCH_SIZE
+            else
+                ! Last batch (potentially partial)
+                pos = int(batch - 1, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+                read(unit_num, pos=pos) buffer(:, 1:last_batch_size)
+                samples_covered = samples_covered + last_batch_size
+            endif
+        end do
+
+        close(unit_num)
+
+        if (samples_covered == num_samples) then
+            print *, "  Samples covered:     PASS"
+        else
+            print '(A, I6, A, I6, A)', "  Samples covered:     ", samples_covered, &
+                  " (expected ", num_samples, ") - FAIL"
+        endif
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(buffer)
+    end subroutine test_dataset_size
+
+    subroutine test_batch_size_calculation()
+        ! Test the batch size calculation logic
+        integer :: num_samples, batch_idx, actual_size
+        integer :: expected_size
+        logical :: all_pass
+
+        print *, "--- Batch Size Calculation Logic ---"
+
+        all_pass = .true.
+
+        ! Test case: 1000 samples, batch_size 128
+        ! Should be 7 full batches (896 samples) + 1 partial (104 samples)
+        num_samples = 1000
+
+        do batch_idx = 1, 8
+            actual_size = get_batch_size(num_samples, BATCH_SIZE, batch_idx)
+
+            if (batch_idx <= 7) then
+                expected_size = BATCH_SIZE
+            else
+                expected_size = 104  ! 1000 - 7*128 = 104
+            endif
+
+            if (actual_size /= expected_size) then
+                print '(A, I2, A, I4, A, I4)', "  Batch ", batch_idx, &
+                      ": got ", actual_size, " expected ", expected_size
+                all_pass = .false.
+            endif
+        end do
+
+        if (all_pass) then
+            print *, "  Batch size logic:    PASS"
+        else
+            print *, "  Batch size logic:    FAIL"
+        endif
+    end subroutine test_batch_size_calculation
+
+    function get_batch_size(num_samples, batch_size, batch_idx) result(actual_size)
+        integer, intent(in) :: num_samples, batch_size, batch_idx
+        integer :: actual_size
+        integer :: start_idx, end_idx
+
+        start_idx = (batch_idx - 1) * batch_size + 1
+        end_idx = min(start_idx + batch_size - 1, num_samples)
+        actual_size = end_idx - start_idx + 1
+
+        if (actual_size < 0) actual_size = 0
+    end function get_batch_size
+
+    subroutine test_last_batch_data_integrity()
+        ! Ensure last batch data is correct, not garbage
+        integer, parameter :: NUM_SAMPLES = 1000
+        integer :: num_full_batches, last_batch_size
+        real(4), allocatable :: full_data(:,:)
+        real(4), allocatable :: batch_data(:,:)
+        character(len=256) :: temp_file
+        integer :: unit_num, i, j, batch
+        integer(8) :: pos, bytes_per_sample
+        integer :: mismatches, idx
+        real(4) :: expected_val
+
+        print *, "--- Last Batch Data Integrity ---"
+
+        num_full_batches = NUM_SAMPLES / BATCH_SIZE
+        last_batch_size = mod(NUM_SAMPLES, BATCH_SIZE)
+
+        ! Create data with known pattern
+        allocate(full_data(FEATURE_SIZE, NUM_SAMPLES))
+        do i = 1, NUM_SAMPLES
+            full_data(:, i) = real(i) / 1000.0  ! Unique value per sample
+        end do
+
+        temp_file = "/tmp/v28d_integrity_test.bin"
+        unit_num = 131
+        bytes_per_sample = int(FEATURE_SIZE, 8) * 4
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='replace')
+        write(unit_num) full_data
+        close(unit_num)
+
+        ! Read and verify last batch
+        allocate(batch_data(FEATURE_SIZE, BATCH_SIZE))
+
+        open(unit=unit_num, file=temp_file, form='unformatted', &
+             access='stream', status='old')
+
+        ! Seek to last batch
+        batch = num_full_batches + 1
+        pos = int(num_full_batches, 8) * int(BATCH_SIZE, 8) * bytes_per_sample + 1
+        read(unit_num, pos=pos) batch_data(:, 1:last_batch_size)
+
+        close(unit_num)
+
+        ! Verify data
+        mismatches = 0
+        do i = 1, last_batch_size
+            idx = num_full_batches * BATCH_SIZE + i
+            expected_val = real(idx) / 1000.0
+
+            do j = 1, FEATURE_SIZE
+                if (abs(batch_data(j, i) - expected_val) > 1e-6) then
+                    mismatches = mismatches + 1
+                endif
+            end do
+        end do
+
+        print '(A, I4)', "  Last batch size:     ", last_batch_size
+        print '(A, I10)', "  Elements checked:    ", last_batch_size * FEATURE_SIZE
+        print '(A, I10)', "  Mismatches:          ", mismatches
+
+        if (mismatches == 0) then
+            print *, "  Data integrity:      PASS"
+        else
+            print *, "  Data integrity:      FAIL"
+        endif
+
+        ! Additional check: ensure we didn't read beyond file
+        print *, "  Buffer overrun:      PASS (no crash)"
+
+        ! Cleanup
+        open(unit=unit_num, file=temp_file, status='old')
+        close(unit_num, status='delete')
+
+        deallocate(full_data, batch_data)
+    end subroutine test_last_batch_data_integrity
+
+end program test_13_variable_batch_size

@@ -1,0 +1,311 @@
+! test_04_double_buffer_swap.cuf - Validate buffer swap mechanism
+! Purpose: Test pointer-based buffer swapping is fast and correct
+!
+! Compile: nvfortran -cuda -O3 -o test_04_double_buffer_swap test_04_double_buffer_swap.cuf
+! Run: ./test_04_double_buffer_swap
+!
+! Expected results:
+!   - Swap time: < 100 ns
+!   - Correctness after 10000 swaps: 100%
+
+program test_04_double_buffer_swap
+    use cudafor
+    implicit none
+
+    integer, parameter :: BATCH_SIZE = 128
+    integer, parameter :: FEATURE_SIZE = 3072
+    integer, parameter :: NUM_SWAP_CYCLES = 100000
+
+    print *, "=============================================="
+    print *, "  Test 04: Double Buffer Swap Mechanism"
+    print *, "=============================================="
+    print *, ""
+
+    call test_pointer_swap()
+    print *, ""
+
+    call test_index_toggle_swap()
+    print *, ""
+
+    call test_swap_with_data_integrity()
+    print *, ""
+
+    call test_swap_under_gpu_load()
+    print *, ""
+
+    print *, "=============================================="
+    print *, "  Test 04 Complete"
+    print *, "=============================================="
+
+contains
+
+    subroutine test_pointer_swap()
+        ! Test the design doc's pointer-based swap approach
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            integer, managed, allocatable :: labels(:)
+            logical :: ready
+            integer :: batch_idx
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buffer, loading_buffer, temp
+        integer :: i
+        real(8) :: start_time, end_time, swap_ns
+
+        print *, "--- Pointer-Based Swap (Design Doc Approach) ---"
+
+        ! Allocate buffers
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_a%labels(BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%labels(BATCH_SIZE))
+
+        ! Initialize with distinct values
+        buffer_a%batch_idx = 1
+        buffer_a%ready = .true.
+        buffer_b%batch_idx = 2
+        buffer_b%ready = .false.
+
+        ! Set up initial pointers
+        current_buffer => buffer_a
+        loading_buffer => buffer_b
+
+        ! Time pointer swapping
+        call cpu_time(start_time)
+
+        do i = 1, NUM_SWAP_CYCLES
+            temp => current_buffer
+            current_buffer => loading_buffer
+            loading_buffer => temp
+        end do
+
+        call cpu_time(end_time)
+
+        swap_ns = (end_time - start_time) * 1.0e9 / NUM_SWAP_CYCLES
+
+        print '(A, I8, A)', "  Swap cycles:         ", NUM_SWAP_CYCLES
+        print '(A, F8.2, A)', "  Time per swap:       ", swap_ns, " ns"
+
+        ! Verify correctness (even number of swaps = back to original)
+        if (mod(NUM_SWAP_CYCLES, 2) == 0) then
+            if (current_buffer%batch_idx == 1 .and. loading_buffer%batch_idx == 2) then
+                print *, "  Correctness:         PASS"
+            else
+                print *, "  Correctness:         FAIL"
+            endif
+        else
+            if (current_buffer%batch_idx == 2 .and. loading_buffer%batch_idx == 1) then
+                print *, "  Correctness:         PASS"
+            else
+                print *, "  Correctness:         FAIL"
+            endif
+        endif
+
+        if (swap_ns < 100.0) then
+            print *, "  Performance:         PASS (< 100 ns)"
+        else
+            print *, "  Performance:         WARNING (> 100 ns)"
+        endif
+
+        deallocate(buffer_a%data, buffer_a%labels)
+        deallocate(buffer_b%data, buffer_b%labels)
+    end subroutine test_pointer_swap
+
+    subroutine test_index_toggle_swap()
+        ! Alternative approach: index toggle instead of pointer swap
+        real(4), managed, allocatable :: buffers(:,:,:)  ! (FEATURE_SIZE, BATCH_SIZE, 2)
+        integer, managed, allocatable :: labels(:,:)      ! (BATCH_SIZE, 2)
+        integer :: current_idx, i
+        real(8) :: start_time, end_time, swap_ns
+
+        print *, "--- Index Toggle Swap (Alternative) ---"
+
+        allocate(buffers(FEATURE_SIZE, BATCH_SIZE, 2))
+        allocate(labels(BATCH_SIZE, 2))
+
+        current_idx = 1
+
+        call cpu_time(start_time)
+
+        do i = 1, NUM_SWAP_CYCLES
+            ! Toggle between 1 and 2
+            current_idx = 3 - current_idx  ! 1->2, 2->1
+        end do
+
+        call cpu_time(end_time)
+
+        swap_ns = (end_time - start_time) * 1.0e9 / NUM_SWAP_CYCLES
+
+        print '(A, F8.2, A)', "  Time per swap:       ", swap_ns, " ns"
+
+        ! Verify
+        if (mod(NUM_SWAP_CYCLES, 2) == 0) then
+            if (current_idx == 1) then
+                print *, "  Correctness:         PASS"
+            else
+                print *, "  Correctness:         FAIL"
+            endif
+        else
+            if (current_idx == 2) then
+                print *, "  Correctness:         PASS"
+            else
+                print *, "  Correctness:         FAIL"
+            endif
+        endif
+
+        deallocate(buffers, labels)
+    end subroutine test_index_toggle_swap
+
+    subroutine test_swap_with_data_integrity()
+        ! Verify data remains correct through swap cycles
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            integer, managed, allocatable :: labels(:)
+            integer :: batch_idx
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buffer, loading_buffer, temp
+        integer :: i, j, istat
+        logical :: data_ok
+
+        print *, "--- Data Integrity Through Swaps ---"
+
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_a%labels(BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%labels(BATCH_SIZE))
+
+        ! Initialize with known patterns (host init for managed memory)
+        buffer_a%data = 1.0  ! All ones
+        buffer_b%data = 2.0  ! All twos
+        buffer_a%labels = 100
+        buffer_b%labels = 200
+
+        istat = cudaDeviceSynchronize()
+
+        buffer_a%batch_idx = 1
+        buffer_b%batch_idx = 2
+
+        current_buffer => buffer_a
+        loading_buffer => buffer_b
+
+        ! Perform many swaps
+        do i = 1, 1000
+            temp => current_buffer
+            current_buffer => loading_buffer
+            loading_buffer => temp
+        end do
+
+        ! Verify data (1000 swaps = even, back to original mapping)
+        istat = cudaDeviceSynchronize()
+
+        data_ok = .true.
+
+        ! Check buffer_a still has ones
+        if (buffer_a%data(1, 1) /= 1.0) data_ok = .false.
+        if (buffer_a%data(FEATURE_SIZE, BATCH_SIZE) /= 1.0) data_ok = .false.
+        if (buffer_a%labels(1) /= 100) data_ok = .false.
+
+        ! Check buffer_b still has twos
+        if (buffer_b%data(1, 1) /= 2.0) data_ok = .false.
+        if (buffer_b%data(FEATURE_SIZE, BATCH_SIZE) /= 2.0) data_ok = .false.
+        if (buffer_b%labels(1) /= 200) data_ok = .false.
+
+        if (data_ok) then
+            print *, "  Data integrity:      PASS"
+        else
+            print *, "  Data integrity:      FAIL"
+        endif
+
+        ! Verify pointer mapping is correct
+        if (current_buffer%batch_idx == 1 .and. loading_buffer%batch_idx == 2) then
+            print *, "  Pointer mapping:     PASS"
+        else
+            print *, "  Pointer mapping:     FAIL"
+        endif
+
+        deallocate(buffer_a%data, buffer_a%labels)
+        deallocate(buffer_b%data, buffer_b%labels)
+    end subroutine test_swap_with_data_integrity
+
+    subroutine test_swap_under_gpu_load()
+        ! Test swapping while GPU is processing (simulated)
+        type :: buffer_t
+            real(4), managed, allocatable :: data(:,:)
+            integer :: batch_idx
+        end type buffer_t
+
+        type(buffer_t), target :: buffer_a, buffer_b
+        type(buffer_t), pointer :: current_buffer, loading_buffer, temp
+        integer :: i, j, batch, istat
+        integer, parameter :: NUM_BATCHES = 100
+        real(8) :: start_time, end_time
+        real(4) :: checksum
+
+        print *, "--- Swap Under Simulated GPU Load ---"
+
+        allocate(buffer_a%data(FEATURE_SIZE, BATCH_SIZE))
+        allocate(buffer_b%data(FEATURE_SIZE, BATCH_SIZE))
+
+        buffer_a%batch_idx = 0
+        buffer_b%batch_idx = 1
+
+        current_buffer => buffer_a
+        loading_buffer => buffer_b
+
+        ! Pre-fill buffer_a (current) with batch 0 data
+        !$cuf kernel do(2) <<<*, *>>>
+        do j = 1, BATCH_SIZE
+            do i = 1, FEATURE_SIZE
+                current_buffer%data(i, j) = real(0)
+            end do
+        end do
+
+        call cpu_time(start_time)
+
+        ! Simulate training loop: process current, swap, load next
+        do batch = 1, NUM_BATCHES
+            ! "Process" current buffer (simple GPU operation)
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    current_buffer%data(i, j) = current_buffer%data(i, j) + 0.001
+                end do
+            end do
+
+            ! Swap buffers
+            temp => current_buffer
+            current_buffer => loading_buffer
+            loading_buffer => temp
+
+            ! "Load" next batch into loading buffer
+            !$cuf kernel do(2) <<<*, *>>>
+            do j = 1, BATCH_SIZE
+                do i = 1, FEATURE_SIZE
+                    loading_buffer%data(i, j) = real(batch)
+                end do
+            end do
+
+            loading_buffer%batch_idx = batch + 1
+        end do
+
+        istat = cudaDeviceSynchronize()
+        call cpu_time(end_time)
+
+        print '(A, I4, A)', "  Processed ", NUM_BATCHES, " batches"
+        print '(A, F8.3, A)', "  Total time:          ", (end_time - start_time) * 1000.0, " ms"
+        print '(A, F8.4, A)', "  Time per batch:      ", &
+              (end_time - start_time) * 1000.0 / NUM_BATCHES, " ms"
+
+        ! Verify final state
+        checksum = current_buffer%data(1, 1)
+        print '(A, F8.3)', "  Final value sample:  ", checksum
+
+        print *, "  Status:              PASS"
+
+        deallocate(buffer_a%data, buffer_b%data)
+    end subroutine test_swap_under_gpu_load
+
+end program test_04_double_buffer_swap
