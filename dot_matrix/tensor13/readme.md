@@ -1,3 +1,20 @@
+# Tensor Core Engine v3 - Improvements (February 22, 2026)
+
+- cudaStreamSynchronize was syncing wrong stream
+- iterations=1 could return incorrect result when power=1
+- tensor_5d_matmul python wrapper discarding its own transpose
+- tensor_5d_matmul was reading a device array element by element from host (compute indices on host)
+- batched_matmul was using a serial host loop instead of cublasGemmStridedBatchedEx once
+- tensor_5d_matmul was launching a kernel just to compute array indices
+- second cuBLAS handle and stream initialised but not used
+- removed old kernels and functions never called (development versions)
+- duplicate helper functions, moved to module private procedure
+- Ada Lovelace compute capacity detection was incorrect
+- excessive streams launched
+- python ctypes missing 'restype = None'
+
+Slight performance uplift and improved notebook structure. RTX4060 test to follow (currently occupied in generating densities for 40 hours+).
+
 # Tensor Core Engine v2 - Improvements (December 30, 2025)
 
 ## Summary
