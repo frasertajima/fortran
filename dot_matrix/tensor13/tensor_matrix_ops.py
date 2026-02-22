@@ -618,8 +618,8 @@ class TensorMatrixOps:
         a_gpu = cp.asfortranarray(a_gpu.transpose(3,4,2,1,0))  # (h,w,d,c,b)
         b_gpu = cp.asfortranarray(b_gpu.transpose(3,4,2,1,0))  # (w,new_w,d,c,b)
 
-        # Create output array in Fortran order.
-        c_gpu = cp.zeros((batch, channels, depth, height, new_width),
+        # Create output array in Fortran order matching kernel's (H,NW,D,C,B) layout.
+        c_gpu = cp.zeros((height, new_width, depth, channels, batch),
                             dtype=cp.float64, order='F')
 
 
@@ -643,7 +643,7 @@ class TensorMatrixOps:
         result = cp.ascontiguousarray(c_gpu.transpose(4,3,2,0,1))
 
         # Return based on input type, converting to C order on return.
-        return cp.asnumpy(c_gpu, order='C') if isinstance(a, np.ndarray) else c_gpu.copy()
+        return cp.asnumpy(result) if isinstance(a, np.ndarray) else result  # BUG-3 FIX: return transposed result not raw c_gpu
 
     # python wrapper is running py_matmul, not tensor_5d_matmul; the answers are correct to e-5
     def parallel_tensor_5d_matmul(self, a, b, max_workers=4):
