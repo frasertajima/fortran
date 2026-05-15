@@ -10,6 +10,19 @@ In the context of other batched operations:
 
 Replaced improved matrix operations with near FP32 accuracy and true FP64 workflows. FP64 does not use split precision due to lack of FP64 tensor cores on consumer GPUs. Still, we get a modest uplift by avoiding python overhead. Added Jupyter notebook to test in quantum simulation and Padé approximation tests.
 
+## When to use each tier
+
+| Situation | Recommended |
+|---|---|
+| Training loop, loss is the only output | `matmul` (TF32) |
+| Gradient accumulation, weight updates | `matmul_tc_split` |
+| Numerical solver inner loop, error tolerance 1e-5 | `matmul_tc_split` |
+| Numerical solver, error tolerance 1e-10 | FP64 |
+| Ill-conditioned system, need FP64 solution | MPDOK (GMRES-IR or LU-IR) |
+| Single-kernel bias+relu fusion needed | `batched_matmul_bias_relu` (TF32) |
+
+---
+
 After reviewing https://github.com/NVIDIA/cudnn-frontend, I am relieved to find our tensor core engine has incorporated most of the learnings employed by Nvidia (and confirms our approach in the matter). One interesting discovery did come up: **epilogue fusion via cuBLAS-lt**. 
 Thus v5 incorporates these changes with modest improvement:
 
