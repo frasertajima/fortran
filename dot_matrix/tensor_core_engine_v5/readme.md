@@ -1,3 +1,13 @@
+### New: matmul_tc_split — Ozaki Split Precision Matrix Multiplication
+
+A hybrid GEMM that delivers FP32-level accuracy (~1e-6 to 1e-7 relative error) at 5–19× the speed of stock FP64, by combining one exact-FP32 GEMM on CUDA cores with two TF32 correction GEMMs on tensor cores. This means that we hit the *same accuracy* as improved_fp32 but with 2x the speed:
+
+<img width="2234" height="740" alt="fig_matmul_4tier" src="https://github.com/user-attachments/assets/b593984a-cd70-4b93-8753-f9cfdbc741f1" />
+
+
+In the context of other batched operations:
+<img width="2084" height="741" alt="fig_batched_matmul_4tier" src="https://github.com/user-attachments/assets/a839e579-755c-41c8-8c33-0a20c44ca74f" />
+
 Replaced improved matrix operations with near FP32 accuracy and true FP64 workflows. FP64 does not use split precision due to lack of FP64 tensor cores on consumer GPUs. Still, we get a modest uplift by avoiding python overhead. Added Jupyter notebook to test in quantum simulation and Padé approximation tests.
 
 After reviewing https://github.com/NVIDIA/cudnn-frontend, I am relieved to find our tensor core engine has incorporated most of the learnings employed by Nvidia (and confirms our approach in the matter). One interesting discovery did come up: **epilogue fusion via cuBLAS-lt**. 
