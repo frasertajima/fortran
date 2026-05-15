@@ -171,6 +171,12 @@ class TensorMatrixOps:
         ]
         self.lib.py_improved_matmul32.restype = None
 
+        self.lib.py_matmul_tc_split.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ]
+        self.lib.py_matmul_tc_split.restype = None
+
         self.lib.py_tensor_matrix_multiply.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
@@ -185,6 +191,12 @@ class TensorMatrixOps:
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
         ]
+
+        self.lib.py_batched_matmul_tc_split.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
+        ]
+        self.lib.py_batched_matmul_tc_split.restype = None
 
         # v5: epilogue-fused GEMM + bias + relu / bias-only
         self.lib.py_batched_matmul_bias_relu.argtypes = [
@@ -300,6 +312,35 @@ class TensorMatrixOps:
         _, N = b_f.shape
         c_f = cp.empty((M, N), dtype=cp.float64, order='F')
         self.lib.py_improved_matmul32(
+            ctypes.c_void_p(a_f.data.ptr), ctypes.c_void_p(b_f.data.ptr),
+            ctypes.c_void_p(c_f.data.ptr),
+            ctypes.c_int(M), ctypes.c_int(K), ctypes.c_int(N))
+        cp.cuda.Stream.null.synchronize()
+        return cp.asnumpy(c_f) if isinstance(a, np.ndarray) else c_f
+
+    def matmul_tc_split(self, a, b):
+        """A @ B — hybrid split: exact-FP32 main term + TF32 correction terms.
+
+        Algorithm:
+            Split A = Ah + Al,  B = Bh + Bl  (Ah = FP32(A), Al = A - Ah, etc.)
+            T1 = exact_FP32_GEMM(Ah, Bh)   main term, CUDA cores
+            T2 = TF32_GEMM(Ah, Bl)         correction (~1e-7 magnitude), tensor cores
+            T3 = TF32_GEMM(Al, Bh)         correction (~1e-7 magnitude), tensor cores
+            C  = FP64(T1 + T2 + T3)
+
+        TF32 error in T2/T3 is ~1e-5 x |correction| ~ 1e-12 x |A||B| -- negligible.
+        Accuracy: ~1e-6 to 1e-7 (limited by FP32 accumulation in T1 for large N).
+        Speed: 3 GEMMs (1 exact-FP32 + 2 TF32) vs 5 exact-FP32 in improved_matmul32.
+
+        Use when: improved_matmul32 accuracy is sufficient but speed matters,
+                  or when you want tensor cores involved in the computation.
+        """
+        a_f = cp.asfortranarray(cp.asarray(a, dtype=cp.float64))
+        b_f = cp.asfortranarray(cp.asarray(b, dtype=cp.float64))
+        M, K = a_f.shape
+        _, N = b_f.shape
+        c_f = cp.empty((M, N), dtype=cp.float64, order='F')
+        self.lib.py_matmul_tc_split(
             ctypes.c_void_p(a_f.data.ptr), ctypes.c_void_p(b_f.data.ptr),
             ctypes.c_void_p(c_f.data.ptr),
             ctypes.c_int(M), ctypes.c_int(K), ctypes.c_int(N))
@@ -593,6 +634,52 @@ class TensorMatrixOps:
             ctypes.c_void_p(c_gpu.data.ptr),
             m, k, n, batch_size
         )
+
+        result = cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
+        return result.reshape((*a.shape[:-2], m, n))
+
+    def batched_matmul_tc_split(self, a, b):
+        """Compute batched matrix multiplication with Ozaki split precision.
+
+        3-GEMM algorithm: T1=Ah*Bh (exact FP32), T2=Ah*Bl (TF32), T3=Al*Bh (TF32).
+        C = FP64(T1) + FP64(T2) + FP64(T3).
+
+        Accuracy: ~1e-6 relative (matches improved_matmul32).
+        Speed: ~3x faster than batched_matmul_fp64, close to batched_matmul (TF32).
+
+        Args:
+            a: Batch of matrices (..., m, k) FP64
+            b: Batch of matrices (..., k, n) FP64
+
+        Returns:
+            Batch of matrix products (..., m, n) FP64
+        """
+        if a.shape[:-2] != b.shape[:-2]:
+            raise ValueError("Batch dimensions must match")
+
+        batch_size = int(np.prod(a.shape[:-2]))
+        m, k = a.shape[-2:]
+        n = b.shape[-1]
+
+        a_reshaped = a.reshape(batch_size, m, k)
+        b_reshaped = b.reshape(batch_size, k, n)
+
+        if isinstance(a, np.ndarray):
+            a_gpu = cp.asarray(a_reshaped, dtype=cp.float64, order='C')
+            b_gpu = cp.asarray(b_reshaped, dtype=cp.float64, order='C')
+        else:
+            a_gpu = cp.ascontiguousarray(a_reshaped, dtype=cp.float64)
+            b_gpu = cp.ascontiguousarray(b_reshaped, dtype=cp.float64)
+
+        c_gpu = cp.empty((batch_size, m, n), dtype=cp.float64, order='C')
+
+        self.lib.py_batched_matmul_tc_split(
+            ctypes.c_void_p(a_gpu.data.ptr),
+            ctypes.c_void_p(b_gpu.data.ptr),
+            ctypes.c_void_p(c_gpu.data.ptr),
+            ctypes.c_int(m), ctypes.c_int(k), ctypes.c_int(n), ctypes.c_int(batch_size)
+        )
+        cp.cuda.Stream.null.synchronize()
 
         result = cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
         return result.reshape((*a.shape[:-2], m, n))
