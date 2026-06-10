@@ -1,3 +1,5 @@
+June 10, 2026: after code review by Claude Fable, code cleanup and adding robustness with error checking for v5.1; smoke test passed and new notebook benchmark for v5.1 is saved.
+
 ### New: matmul_tc_split — Ozaki Split Precision Matrix Multiplication
 
 A hybrid GEMM that delivers FP32-level accuracy (~1e-6 to 1e-7 relative error) at 5–19× the speed of stock FP64, by combining one exact-FP32 GEMM on CUDA cores with two TF32 correction GEMMs on tensor cores. This means that we hit the *same accuracy* as improved_fp32 but with 2x the speed:
