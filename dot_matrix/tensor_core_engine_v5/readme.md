@@ -1,4 +1,13 @@
-June 10, 2026: after code review by Claude Fable, code cleanup and adding robustness with error checking for v5.1; smoke test passed and new notebook benchmark for v5.1 is saved.
+June 10, 2026: after code review by Claude Fable 5, code cleanup for v5.1; smoke test passed and new notebook benchmark for v5.1 is saved.
+
+- R1/B2  Every py_* entry point is now an integer(c_int) FUNCTION returning 0 on success / first failing CUDA-or-cuBLAS status (nonzero) on error.  Existing ctypes callers with restype=None are unaffected.
+- B4/R3  No private cuBLAS handles: the module borrows resources(1) from cuda_batch_state (handle + stream).  The unused second handle and stream are gone.
+- B5/M1  improved_matmul64 deleted (Python wrapper uses cp.matmul); dead kernels, tensor_5d type, FP16 path, CUDA_R_TF32 constant removed.
+- M2     Split routines (matmul_tc_split, improved_matmul32, batched_matmul_tc_split) now run from the workspace pool, so py_workspace_cleanup really frees ALL persistent device memory.
+- P1     matrix_dot / tensor_matrix_multiply ping-pong between pool buffers instead of copying the full matrix every iteration; redundant zero-fills removed (beta=0 GEMMs overwrite the output).
+- P3     tensor_4d_matmul / tensor_5d_matmul use chunked cublasSgemmStridedBatched instead of one GEMM per slice.
+- B6     64-bit offsets in strided_batch_multiply.
+- BUG    matrix_dot non-power-of-two path computed A^(p+1) instead of A^p (loop ran iterations-1 multiplies on top of the initial A²).
 
 ### New: matmul_tc_split — Ozaki Split Precision Matrix Multiplication
 
