@@ -2,7 +2,10 @@
 
 Four changes: the strided-batch GEMM formulation (D2), the strided-batch layout
 contract (D5), the tc_split FP16 range guard (D6), and the FP16 range guard
-across the whole plain tensor-core tier (D7). A third (D3, the cuBLAS handle math mode) was tried and
+across the whole plain tensor-core tier (D7). **A second pass on 2026-09-20
+added D8-D13** — Dgemv dispatch parity, the `batched_vector` formulation, the
+fused epilogue's compute type, `matrix_power(mode=)`, the benchmark harness, and
+a `rel_err` column; see the dated section at the end of this file. A third (D3, the cuBLAS handle math mode) was tried and
 **reverted** — it bought no accuracy and cost up to 40%; see ENGINE_DIFFERENCES
 D3 and the note at the top of `initialize_cublas`. v5.1 is preserved
 verbatim in
@@ -558,3 +561,244 @@ and a from-scratch reimplementation in another language, because both inherited
 the same misreading of one cuBLAS enum, and no accuracy measurement could
 distinguish FP16 from TF32. What exposed it was comparing the two engines
 closely enough that a 1.8x speed difference on one row demanded an explanation.
+
+---
+
+# 2026-09-20 — accuracy, comparability, and the benchmark itself
+
+A second pass, driven by a single question: *why does Fortran still win
+`matrix_multiply`, `vector_matrix` and `matrix_vector`?* Two of those three
+turned out not to be real, the third was dispatch overhead rather than kernels,
+and chasing them surfaced two genuine accuracy bugs and one measurement bug that
+had been hiding results since the comparison notebook was written.
+
+Everything below is measured on the RTX 4060 (Vengeance), FP64 inputs scaled by
+`1/(sqrt(k)*1.1)`, min-of-N timing with the GPU clock-warmed.
+
+## D8 — the Dgemv tier was never a kernel gap
+
+`vector_matrix` and `matrix_vector` sat at 0.83-0.95 of Fortran. Both engines
+call the **same** `cublasDgemv` — `cuda_matlib.cuf:1319/1348` and
+`rust_matlib/src/lib.rs:1971/1987` — and `max_diff` is exactly `0.0` on every
+row, so there was no math to be slower at. At n=16..1024 these ops are
+20-38 us end to end and only a few microseconds of that is the GPU: the deficit
+was a **constant ~3.5 us per call**, which is why it read as a fixed ratio
+rather than a shape-dependent one.
+
+Two fixes:
+
+- `entry()` (`lib.rs`) did a full `cuCtxSynchronize` **on entry**. It bought
+  nothing — `State::stream` is the context's default stream, the same legacy
+  stream CuPy enqueues on, so anything CuPy produced is already ordered ahead —
+  and it was stricter than the Fortran engine, which only syncs on exit.
+- `_dev2` built an `x.T` view purely to read a pointer. `_sq_ptr`/`_vec_ptr` in
+  `rust_matrix_ops.py` return `(array, ptr, trans)` without materialising it.
+
+| | before | after |
+|---|---|---|
+| library boundary, matched op | Rust +0.6 to +0.7 us | **0.0 +/- 0.15 us** |
+| end-to-end ratio (notebook) | 0.83-0.95 | **0.91-0.96** |
+
+The residual ~1.7 us is CuPy/ctypes wrapper cost on both sides. A stripped
+wrapper (no validation, no NumPy support) runs 1.3-1.6 us *faster* than Fortran,
+so the headroom is real and Python-side; it was deliberately not taken, because
+taking it means dropping input validation and the NumPy-in/NumPy-out contract.
+
+**`matrix_multiply` was never a Fortran win** — it is parity (1.005-1.01x with
+F-order inputs). The earlier appearance of a gap was a harness bug; see D13.
+
+## D9 — `batched_vector` compared two different precision tiers
+
+Rust was 1.46-1.54x "faster" here. It was not the same operation:
+
+| | Fortran | Rust (before) |
+|---|---|---|
+| call | `cublasSgemmStridedBatched`, **N = 1** | one `cublasGemmEx`, batch folded into **N** |
+| kernel cuBLAS picked | FP32 | FP16 tensor-core |
+| max_diff | ~3e-8 | ~1.4e-5 to 5.6e-5 |
+
+Both handles are `CUBLAS_TENSOR_OP_MATH` (the `FAST_16F` alias, D3), so with
+N = batch cuBLAS is free to choose a tensor-core kernel and does; with N = 1 it
+cannot. Proof that N is what decides: `strided_batch`, N = n, sits at ~1.5e-5 on
+**both** engines.
+
+`rs_batched_vector_matmul` now uses Fortran's N = 1 formulation. From row-major
+buffers this needs no extra transpose, only the right leading dimensions:
+`transa=T, lda=n, strideA=0`; `transb=T, ldb=batch, strideB=1` (so batch *b*
+reads `pv[i*batch + b]`); `ldc=n, strideC=n`, which writes Y straight out as
+(batch, n) row-major.
+
+Result: error now **2.1e-8 to 5.2e-8**, at or below Fortran's, verified at
+n=7..513 and batch=1..100 — **and it got faster, 1.46-1.54x -> 1.63-1.94x**.
+The N=1 batched kernel suits these tiny shapes better than one wide tensor-core
+GEMM. The expected speed-for-accuracy trade did not materialise.
+
+## D10 — the fused epilogue was never pinned to a tier
+
+Found while checking D9's neighbours: at **(8, 16, 16, 16) only**, the cuBLASLt
+bias+relu epilogue gave Fortran 1.3e-7 and Rust 2.5e-4. Both descriptors already
+requested `CUBLAS_COMPUTE_32F_FAST_TF32` (`cublaslt_bridge.c:134`,
+`lib.rs`), so this was not a bug in either engine — it was the heuristic
+returning an FP32 kernel for one layout and a TF32 kernel for the other.
+
+`FAST_TF32` is *permission* to use TF32, not a pin. Asking for plain
+`CUBLAS_COMPUTE_32F` forbids it:
+
+| shape | before (both ~) | after (both) | throughput cost |
+|---|---|---|---|
+| (8, 16^3) | 1.3e-7 / 2.5e-4 | 1.3e-7 / 1.5e-7 | none |
+| (8, 64^3) | 1.6e-4 | 1.4e-7 | -9% / -11% |
+| (8, 256^3) | 7.6e-5 | 3.0e-7 | -15% / -20% |
+| (8, 1024^3) | 4.1e-5 | 3.5e-7 | -22% / -31% |
+| (1, 512x2048x128) | 2.2e-5 | 2.2e-7 | -11% / -13% |
+
+**~1e-4 -> 8.8e-8..3.5e-7 at every shape on both engines, for 0-31% of the
+throughput**, and Rust still leads 1.16-1.59x. Exact FP32 is now the default.
+
+Implemented as **one switch shared by both engines**: `lt_compute_type()` in
+`rust_matlib/src/lib.rs` and in `cublaslt_bridge.c`, both reading
+`TME_EPILOGUE_TF32` (unset/`0` = exact FP32, `1` = the old TF32) and resolving
+once per process. One variable moves both engines, so they cannot silently drift
+into different tiers again — which is exactly how this was found.
+
+Note for downstream callers: the **Fortran** engine's epilogue tier changed too.
+Anything that assumed ~1e-4 from `batched_matmul_bias`/`bias_relu` now gets
+~1e-7 and somewhat less throughput.
+
+## D11 — `matrix_power` gained `mode=`
+
+Context first, because the `max_diff` column badly misrepresents this operation.
+That column is **absolute**, and `|A^4|max` grows 13 -> 184 from n=256 to
+n=4048 while `create_inputs` holds `|A.B|max` at ~0.22-0.25 for every n. So
+`matrix_power` looks ~100x worse than `matrix_multiply` when, relative to the
+result, it is ~2x:
+
+| | relative error (TF32) |
+|---|---|
+| `matmul` | 5.5e-5 .. 7.3e-5 |
+| `matrix_power` (p=4) | 6.0e-5 .. 1.7e-4 |
+
+Same tier. The 1.1-2.4x is chaining: `power=4` is two GEMMs, and the first
+one's error feeds the second.
+
+`mode="tc_split"` routes every multiply in the binary-exponentiation chain
+through `matmul_tc_split` with FP64 intermediates:
+
+| n | TF32 GF / rel | tc_split GF / rel | cost |
+|---|---|---|---|
+| 256 | 933 / 9.7e-5 | 430 / 2.6e-7 | 0.46x |
+| 1024 | 13279 / 6.5e-5 | 3217 / 3.5e-7 | 0.24x |
+| 4048 | 22279 / 1.7e-4 | 4540 / 5.0e-6 | 0.20x |
+
+**TF32 remains the default.** The ~4-5x is structural to the split tier, not
+specific to `matrix_power`: `matmul` pays the same (18356 -> 4532 GF at n=4048,
+0.25x) for the same accuracy, because tc_split is 3 GEMMs of which the dominant
+one (T1, the exact-FP32 product) runs on **CUDA cores, not tensor cores**.
+
+The chain lives **inside both `.so` files**, not in the wrappers, so C and
+Fortran callers get it too:
+
+- Rust: `rs_matrix_power(a, c, n, power, mode)`, an exact-size f64 scratch pool
+  on `State`, and the mode-1 tc_split core factored out of `rs_matmul_tc_split`
+  as `tc_split_cublas`.
+- Fortran: `py_matrix_dot(a, c, n, power, mode)` and 2-D FP64 square pools
+  `wp_q1..q3` in `workspace_pool.cuf`.
+
+Both use **slot rotation**: every tc_split operand is read-only, so base and
+result are tracked as slot ids that may alias, the base starts as the caller's
+`a` without being copied, and each product goes to whichever of three slots
+neither occupies. Copies for `power=4`: **5 -> 1** (the final write to `c`).
+Fortran dispatches this through `mp_free_slot` / `mp_mul` / `mp_mul_into`
+(3 + 16 select-case branches rather than one flat 48-way).
+
+Verified across **powers 1-17** at n=16/64/257/512 on both engines — every bit
+pattern exercises a different rotation path — plus NumPy round-trip, bad-mode
+and `power=0` rejection. Zero failures.
+
+### Three CUDA-Fortran traps, in order of how long they cost
+
+1. A local `save` device allocatable inside a helper. Suspected, not the cause.
+2. Rank-remapped 2-D device POINTERs passed into a `bind(c)` callee. Suspected,
+   not the cause.
+3. **The cause:** `matmul_tc_split` calls `wp_ensure_fp32_7`, and a device
+   allocatable reallocated by a *callee* leaves the caller's already-captured
+   module descriptors stale. It surfaced as an illegal address in the copy-back
+   kernel **after** a GEMM that had itself succeeded, so the blame landed on the
+   wrong line until it was bisected with per-step syncs. `workspace_pool.cuf`'s
+   own NOTE warns about this class of bug. Fix: pre-size the FP32 pools with
+   `wp_ensure_fp32_7` before the chain starts, so the callee's ensure is a no-op.
+
+Also worth remembering: **a failed nvfortran compile still produced a loadable
+`.so`**, because shared libraries tolerate undefined symbols. `nm -D
+--undefined-only` caught a stale `wp_ensure_fp64_2_` that would otherwise have
+failed only at call time. Check it after any change to a module's public
+interface.
+
+## D12 — what the benchmark was hiding
+
+Three defects in the comparison notebook itself, all of which changed what the
+summary table said:
+
+- **`batched_matmul` and `batched_matmul_fused` never appeared at all.** The
+  Rust cell assigned `batched_matmul_results` / `batched_matmul_fused_results` —
+  the same names as the Fortran cell, not the `_rust`-suffixed ones the summary
+  pairs on — so it silently overwrote the Fortran lists and the summary found no
+  twin. Ten rows had been missing from every table ever produced. Renamed; Rust
+  leads 1.21-1.66x on them at matching accuracy.
+- **`vector_matrix_optimised` was not a second code path.** Its `tensor_op`
+  called `vector_matmul`, the same method the `vector_matrix` cell already
+  benchmarks. Deleted from all five notebooks (neither engine has an "optimised"
+  single-vector entry point; there are exactly three vector entry points and all
+  three already had cells). Useful parting gift: the two identical measurements
+  differed by up to 7%, which fixed the harness noise floor at `repeat=3`.
+- **`repeat=3` could not resolve these ops.** `time_operation`'s sample count is
+  now chosen per shape by `repeats_for(flops)` — 25 samples under `SMALL_FLOPS`
+  (50 MFLOP), 3 above, so the dispatch-bound rows stop wandering while a 0.6 s
+  FP64 reference call at (8, 2048^3) still costs 3 samples. The two hand-rolled
+  cells (`improved_matmul32`'s 4-tier table, `batched_matmul`'s 3-way table)
+  bypass `run_benchmark` and were wired in via `max(REPEAT, repeats_for(flops))`
+  — a floor-raiser, never a reducer, so their existing REPEAT=5/10 on big shapes
+  is untouched.
+
+That last one dissolved an apparent finding: `vector_matrix` (0.99 mean) and
+`matrix_vector` (0.90 mean) looked like different results, and a 400-sample
+measurement puts **both at ~0.93** with identical raw-boundary deltas.
+
+A `matrix_power_tc_split` block was added to all five notebooks so the new mode
+is visible as its own row rather than buried in a docstring.
+
+## D13 — `rel_err`, and the harness bug that cost two wrong conclusions
+
+`calculate_metrics` now also returns `rel_err` (`max_diff / max|reference|`) and
+`ref_mag`, and the summary table, `print_results` and `generate_summary_report`
+all carry a Rel Err column. Absolute `max_diff` is fine within one operation and
+actively misleading across operations, for the reason set out in D11.
+
+The bug that motivated a lot of the above: **`a = cp.asfortranarray(x) / scalar`
+returns a C-order array.** CuPy elementwise ops produce C-order output
+regardless of input order; only in-place `a /= scalar` preserves F-order (which
+`create_inputs` correctly does). `tensor_matrix_ops.py` calls
+`cp.asfortranarray()` on its inputs, which is a no-op on an F-order array and a
+**real n^2 FP64 transpose copy** on a C-order one — 8 MB at n=1024. Getting this
+wrong in a side harness made the Fortran engine look ~2x slower than it is and
+produced two confidently wrong conclusions in one session ("Rust wins
+`matrix_multiply` everywhere" — it is parity; "Rust is 1.6-1.8x faster at Dgemv"
+— it is 0.93x) before the assertion `assert a.flags.f_contiguous` was added to
+the harness.
+
+General form, and the one worth carrying forward: **when a measured gap is far
+larger than the mechanism can explain, suspect the harness before the code.**
+
+## Where v5.2 stands
+
+| operation | relative error | Rust / Fortran |
+|---|---|---|
+| `batched_matmul_fp64`, `vector_matrix`, `matrix_vector` | exact (0.0) | 0.89-0.96 (dispatch) |
+| `batched_vector` | ~2e-8 | 1.63-1.94x |
+| `batched_matmul`, `batched_matmul_fused` | ~8e-8 | 1.21-1.66x |
+| `matrix_power` (tc_split) | 2.6e-7 .. 5.1e-6 | ~1.0 |
+| `matrix_multiply`, `strided_batch`, `matrix_power` (TF32) | 5e-5 .. 2e-4 | 0.97-1.4x |
+
+Two operations moved a full precision tier (`batched_vector`, the fused
+epilogue), one gained a tier as an option (`matrix_power`), and the three tiers
+are now *pinned* rather than left to a cuBLAS heuristic.

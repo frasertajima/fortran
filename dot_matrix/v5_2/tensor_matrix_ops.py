@@ -160,9 +160,10 @@ class TensorMatrixOps:
         self.lib.py_initialize_cuda_resources.restype = None
 
         # Set up all function signatures
+        # (a, c, n, power, mode) -- mode 0 = TF32, 1 = tc_split chain
         self.lib.py_matrix_dot.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_int, ctypes.c_int
+            ctypes.c_int, ctypes.c_int, ctypes.c_int
         ]
 
         self.lib.py_improved_matmul32.argtypes = [
@@ -301,7 +302,8 @@ class TensorMatrixOps:
             ctypes.c_void_p(a_gpu.data.ptr),
             ctypes.c_void_p(c_gpu.data.ptr),
             ctypes.c_int(a_gpu.shape[0]),
-            ctypes.c_int(power)
+            ctypes.c_int(power),
+            ctypes.c_int(0)          # TF32; see matrix_power(mode=...)
         )
 
         cp.cuda.Stream.null.synchronize()
@@ -357,18 +359,37 @@ class TensorMatrixOps:
         c = cp.matmul(a_g, b_g)
         return cp.asnumpy(c) if isinstance(a, np.ndarray) else c
 
-    def matrix_power(self, a, power):
+    def matrix_power(self, a, power, mode="tf32"):
         """Compute matrix power A^n using tensor cores.
 
         Args:
             a: Square matrix (numpy or cupy array)
             power: Integer power to raise matrix to
 
+        mode:
+            "tf32"     — TF32 tensor cores per multiply (default). Fastest;
+                         ~6e-5 to 1.7e-4 relative error, which compounds over
+                         the chain, so a power of 4 is ~3x the error of a
+                         single matmul.
+            "tc_split" — every multiply goes through matmul_tc_split (1 exact
+                         FP32 + 2 TF32 GEMMs). ~2.6e-7 to 4.8e-6 relative,
+                         roughly 100x better, at 2.2-5x the cost. Intermediates
+                         stay FP64 between multiplies, so nothing is lost
+                         between steps. Measured on an RTX 4060 at power=4:
+                         n=256 942 -> 417 GFLOPS, n=4048 23166 -> 4571.
+
+        The chain is binary exponentiation either way, so A^4 costs 2 multiplies.
+
         Returns:
             Result of A^power, same type as input
         """
         if not isinstance(a, (np.ndarray, cp.ndarray)):
             raise TypeError("Input must be numpy or cupy array")
+
+        if mode not in ("tf32", "tc_split"):
+            raise ValueError(f"mode must be 'tf32' or 'tc_split', got {mode!r}")
+        if not isinstance(power, (int, np.integer)) or power < 1:
+            raise ValueError(f"power must be an integer >= 1, got {power!r}")
 
         a_gpu = cp.asarray(a, dtype=cp.float64)
         if a_gpu.shape[0] != a_gpu.shape[1]:
@@ -380,7 +401,7 @@ class TensorMatrixOps:
         self.lib.py_matrix_dot(
             ctypes.c_void_p(a_gpu.data.ptr),
             ctypes.c_void_p(c_gpu.data.ptr),
-            n, power
+            n, power, 0 if mode == "tf32" else 1
         )
 
         return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
@@ -545,6 +566,10 @@ class TensorMatrixOps:
     def batched_matmul_bias_relu(self, a, b, bias):
         """Fused GEMM + bias-add + ReLU via cuBLAS-lt epilogue (v5).
 
+        Exact FP32 compute (~1.5e-7) by default; TME_EPILOGUE_TF32=1 selects
+        TF32 tensor cores instead (~1e-4, 0-31% faster).  rust_matlib reads
+        the same variable, so both engines stay in one precision tier.
+
         Eliminates the global-memory round-trip between the GEMM output and the
         separate bias/activation kernel. Bias and ReLU run in the GEMM output
         registers before the result is written to global memory.
@@ -579,6 +604,9 @@ class TensorMatrixOps:
 
     def batched_matmul_bias(self, a, b, bias):
         """Fused GEMM + bias-add via cuBLAS-lt epilogue (v5), no activation.
+
+        Exact FP32 compute by default; see batched_matmul_bias_relu and
+        TME_EPILOGUE_TF32.
 
         Same as batched_matmul_bias_relu but without ReLU — negative values are
         preserved. Use when you need bias fusion without clamping to zero.

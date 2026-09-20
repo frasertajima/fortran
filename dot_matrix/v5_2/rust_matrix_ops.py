@@ -15,7 +15,8 @@ so the Fortran wrapper's asfortranarray copies are simply not needed.
     ops.batched_matmul(a, b)              # TF32 strided batched
     ops.batched_matmul_tc_split(a, b)
     ops.batched_matmul_fp64(a, b)         # cublasDgemmStridedBatched
-    ops.batched_matmul_bias_relu(a, b, bias)   # cuBLASLt fused epilogue
+    ops.batched_matmul_bias_relu(a, b, bias)   # cuBLASLt fused epilogue, exact FP32
+                                               # (TME_EPILOGUE_TF32=1 -> TF32)
     ops.batched_matmul_bias(a, b, bias)
     ops.vector_matmul(v, a); ops.matmul_vector(a, v)   # FP64 Dgemv
     ops.batched_vector_matmul(v, a)       # TF32
@@ -90,7 +91,8 @@ class RustMatrixOps:
             "rs_version": ([], ctypes.c_uint32),
             "rs_init": ([], i32),
             "rs_workspace_cleanup": ([], i32),
-            "rs_matrix_power": ([u64, u64, u64, i32], i32),
+            # (a, c, n, power, mode) -- mode 0 = TF32, 1 = tc_split chain
+            "rs_matrix_power": ([u64, u64, u64, i32, i32], i32),
             "rs_matmul_tf32": ([u64] * 6 + [i32, i32], i32),
             "rs_improved_matmul32": ([u64] * 6 + [i32, i32], i32),
             "rs_matmul_tc_split": ([u64] * 6 + [i32, u64, i32, i32], i32),
@@ -137,14 +139,62 @@ class RustMatrixOps:
     def _out(result, like):
         return cp.asnumpy(result) if isinstance(like, np.ndarray) else result
 
+    @staticmethod
+    def _sq_ptr(x):
+        """(kept-alive array, device pointer, trans) for a square f64 operand.
+
+        The pointer-only twin of _dev2, for the Dgemv paths. _dev2 hands back
+        `x.T` for an F-order input, and building that view costs ~1.5 us of
+        Python -- which is real money on a call whose GPU work is a few
+        microseconds and whose total is ~20-35 us. A transpose view shares its
+        base pointer, so for a square matrix the pointer and the shape are the
+        same either way and only the trans flag is needed. Returns the array
+        too, so the caller keeps the (possibly freshly copied) buffer alive
+        until the library has read it.
+        """
+        x = cp.asarray(x, dtype=cp.float64)
+        if x.ndim == 2 and x.flags.f_contiguous and not x.flags.c_contiguous:
+            return x, x.data.ptr, 1
+        x = cp.ascontiguousarray(x)
+        return x, x.data.ptr, 0
+
+    @staticmethod
+    def _vec_ptr(x):
+        """(kept-alive array, device pointer) for a 1-D f64 operand."""
+        x = cp.asarray(x, dtype=cp.float64)
+        if not x.flags.c_contiguous:
+            x = cp.ascontiguousarray(x)
+        return x, x.data.ptr
+
     # -- 2-D ---------------------------------------------------------------
-    def matrix_power(self, a, power):
+    def matrix_power(self, a, power, mode="tf32"):
+        """A^power on tensor cores.
+
+        mode:
+            "tf32"     — TF32 tensor cores per multiply (default). Fastest;
+                         ~6e-5 to 1.7e-4 relative error, which compounds over
+                         the chain, so a power of 4 is ~3x the error of a
+                         single matmul.
+            "tc_split" — every multiply goes through matmul_tc_split (1 exact
+                         FP32 + 2 TF32 GEMMs). ~2.6e-7 to 4.8e-6 relative,
+                         roughly 100x better, at 2.2-5x the cost. Intermediates
+                         stay FP64 between multiplies, so nothing is lost
+                         between steps. Measured on an RTX 4060 at power=4:
+                         n=256 942 -> 417 GFLOPS, n=4048 23166 -> 4571.
+
+        The chain is binary exponentiation either way, so A^4 costs 2 multiplies.
+        """
+
+        if mode not in ("tf32", "tc_split"):
+            raise ValueError(f"mode must be 'tf32' or 'tc_split', got {mode!r}")
+        if not isinstance(power, (int, np.integer)) or power < 1:
+            raise ValueError(f"power must be an integer >= 1, got {power!r}")
         a_g, trans = self._dev2(a)  # F-order A: a_g = A^T (C-order), no copy
         n = a_g.shape[0]
         if a_g.shape != (n, n):
             raise ValueError("Input must be a square matrix")
         c = cp.empty((n, n), dtype=cp.float64)
-        self._check(self.lib.rs_matrix_power(a_g.data.ptr, c.data.ptr, n, int(power)), "rs_matrix_power")
+        self._check(self.lib.rs_matrix_power(a_g.data.ptr, c.data.ptr, n, int(power), 0 if mode == "tf32" else 1), "rs_matrix_power")
         # (A^T)^p = (A^p)^T, so for an F-order input the C-order result viewed
         # transposed is A^p in F-order -- still no copy.
         return self._out(c.T if trans else c, a)
@@ -291,23 +341,23 @@ class RustMatrixOps:
 
     # -- vectors -----------------------------------------------------------
     def vector_matmul(self, v, a):
-        v_g = self._dev(v)
-        a_g, at = self._dev2(a)
+        v_g, pv = self._vec_ptr(v)
+        a_g, pa, at = self._sq_ptr(a)
         n = v_g.shape[0]
         if a_g.shape != (n, n):
             raise ValueError("a must be (n, n) with n = len(v)")
         y = cp.empty(n, dtype=cp.float64)
-        self._check(self.lib.rs_vector_matmul(v_g.data.ptr, a_g.data.ptr, y.data.ptr, n, at), "rs_vector_matmul")
+        self._check(self.lib.rs_vector_matmul(pv, pa, y.data.ptr, n, at), "rs_vector_matmul")
         return self._out(y, v)
 
     def matmul_vector(self, a, v):
-        a_g, at = self._dev2(a)
-        v_g = self._dev(v)
+        a_g, pa, at = self._sq_ptr(a)
+        v_g, pv = self._vec_ptr(v)
         n = v_g.shape[0]
         if a_g.shape != (n, n):
             raise ValueError("a must be (n, n) with n = len(v)")
         y = cp.empty(n, dtype=cp.float64)
-        self._check(self.lib.rs_matmul_vector(a_g.data.ptr, v_g.data.ptr, y.data.ptr, n, at), "rs_matmul_vector")
+        self._check(self.lib.rs_matmul_vector(pa, pv, y.data.ptr, n, at), "rs_matmul_vector")
         return self._out(y, a)
 
     def batched_vector_matmul(self, v, a):
