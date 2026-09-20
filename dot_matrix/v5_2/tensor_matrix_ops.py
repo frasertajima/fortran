@@ -563,6 +563,59 @@ class TensorMatrixOps:
         result = cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
         return result.reshape((*a.shape[:-2], m, n))
 
+    @staticmethod
+    def _all_f32(*arrays):
+        return all(getattr(x, "dtype", None) == np.float32 for x in arrays)
+
+    def _batched_bias_f32(self, a, b, bias, relu):
+        """FP32 in, FP32 out (v5.3) -- skips the FP64<->FP32 conversions.
+
+        **Layout follows the activation block**, as on the Rust side. With a
+        C-order `b`, A and B are staged row-major -> column-major for the C
+        bridge's OP_N layouts and the result is transposed back on the way out.
+        With an **F-order** 2-D `b` the F-order path is taken instead
+        (`lt_matmul_bias_*_fp32_t`): A is consumed via OP_T, B is already
+        column-major, and D lands column-major straight in the result -- no
+        staging and no transpose, and the result is itself a valid `b` for the
+        next layer. Weights stay C-order either way.
+        """
+        two_d = getattr(b, "ndim", None) == 2
+        b_cm = bool(two_d and getattr(b, "flags", None) is not None
+                    and b.flags.f_contiguous and not b.flags.c_contiguous)
+
+        if b_cm:
+            m, k = a.shape[-2:]
+            n = b.shape[-1]
+            a_gpu = cp.ascontiguousarray(cp.asarray(a.reshape(m, k), dtype=cp.float32))
+            b_gpu = cp.asarray(b, dtype=cp.float32)
+            bias_gpu = cp.ascontiguousarray(cp.asarray(bias, dtype=cp.float32))
+            c_gpu = cp.empty((m, n), dtype=cp.float32, order="F")
+            fn = (self.lib.py_batched_matmul_bias_relu_f32_t if relu
+                  else self.lib.py_batched_matmul_bias_f32_t)
+            fn(ctypes.c_void_p(a_gpu.data.ptr), ctypes.c_void_p(b_gpu.data.ptr),
+               ctypes.c_void_p(c_gpu.data.ptr), ctypes.c_void_p(bias_gpu.data.ptr),
+               ctypes.c_int(m), ctypes.c_int(k), ctypes.c_int(n))
+            cp.cuda.Stream.null.synchronize()
+            return cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
+
+        batch_size = int(np.prod(a.shape[:-2]))
+        m, k = a.shape[-2:]
+        n = b.shape[-1]
+
+        a_gpu = cp.ascontiguousarray(cp.asarray(a.reshape(batch_size, m, k), dtype=cp.float32))
+        b_gpu = cp.ascontiguousarray(cp.asarray(b.reshape(batch_size, k, n), dtype=cp.float32))
+        c_gpu = cp.empty((batch_size, m, n), dtype=cp.float32)
+        bias_gpu = cp.ascontiguousarray(cp.asarray(bias, dtype=cp.float32))
+
+        fn = (self.lib.py_batched_matmul_bias_relu_f32 if relu
+              else self.lib.py_batched_matmul_bias_f32)
+        fn(ctypes.c_void_p(a_gpu.data.ptr), ctypes.c_void_p(b_gpu.data.ptr),
+           ctypes.c_void_p(c_gpu.data.ptr), ctypes.c_void_p(bias_gpu.data.ptr),
+           ctypes.c_int(m), ctypes.c_int(k), ctypes.c_int(n), ctypes.c_int(batch_size))
+        cp.cuda.Stream.null.synchronize()
+        result = cp.asnumpy(c_gpu) if isinstance(a, np.ndarray) else c_gpu
+        return result.reshape((*a.shape[:-2], m, n))
+
     def batched_matmul_bias_relu(self, a, b, bias):
         """Fused GEMM + bias-add + ReLU via cuBLAS-lt epilogue (v5).
 
@@ -582,6 +635,10 @@ class TensorMatrixOps:
         Returns:
             c: (batch, m, n) fp64, with relu(a@b + bias) applied element-wise
         """
+        # float32 in -> float32 out, through the v5.3 conversion-free path.
+        if self._all_f32(a, b, bias):
+            return self._batched_bias_f32(a, b, bias, True)
+
         batch_size = int(np.prod(a.shape[:-2]))
         m, k = a.shape[-2:]
         n = b.shape[-1]
@@ -611,6 +668,10 @@ class TensorMatrixOps:
         Same as batched_matmul_bias_relu but without ReLU — negative values are
         preserved. Use when you need bias fusion without clamping to zero.
         """
+        # float32 in -> float32 out, through the v5.3 conversion-free path.
+        if self._all_f32(a, b, bias):
+            return self._batched_bias_f32(a, b, bias, False)
+
         batch_size = int(np.prod(a.shape[:-2]))
         m, k = a.shape[-2:]
         n = b.shape[-1]

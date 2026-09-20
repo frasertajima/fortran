@@ -802,3 +802,183 @@ larger than the mechanism can explain, suspect the harness before the code.**
 Two operations moved a full precision tier (`batched_vector`, the fused
 epilogue), one gained a tier as an option (`matrix_power`), and the three tiers
 are now *pinned* rather than left to a cuBLAS heuristic.
+
+---
+
+# v5.3 (started 2026-09-20) — the API boundary, found by a real model
+
+## D14 — the FP64 boundary, found by a real model
+
+`mlp_example_fortran_vs_rust_vs_cupy.ipynb` runs a 64-1024-1024-10 MLP
+(sklearn digits, 98.0% test accuracy, trained in FP64 CuPy) and puts batch
+inference through both engines and both CuPy tiers. Every backend classifies
+identically — ~4e-7 relative on the logits, **zero of 450 digits change label**,
+including the TF32 tier at ~7e-4 — so accuracy was never the question.
+
+Throughput was. With FP64 entry points, at batch 16384:
+
+| backend | GFLOPS |
+|---|---|
+| cupy (FP64) | 217 |
+| **cupy (FP32)** | **5644** |
+| fortran | 2866 |
+| rust | 3446 |
+
+The engines *lost* to plain unfused CuPy FP32. Taking one layer apart,
+(1024 x 1024) @ (1024 x 16384):
+
+| | ms |
+|---|---|
+| engine `matmul`, TF32 tier, no epilogue | 2.87 |
+| cupy FP32 GEMM alone | 3.66 |
+| cupy FP32 GEMM + bias + relu | 4.97 |
+| cupy FP32 incl. casting both operands | 5.57 |
+| engine fused epilogue, exact FP32, FP64 in/out | 6.93 |
+
+The FP64 entry points narrow both operands, run the FP16 range guard's max-abs
+reduction, and widen the result — **per call**, which for a chained model means
+per layer. The op-level benchmark cannot see this: it times one call with the
+conversion folded into it.
+
+## The fix, and how far it goes
+
+`rs_batched_matmul_bias_f32` (Rust) and `py_batched_matmul_bias_relu_f32` /
+`py_batched_matmul_bias_f32` (Fortran), dispatched automatically — pass float32
+arrays to `batched_matmul_bias_relu` and the conversion-free path is taken,
+float32 in, float32 out.
+
+Rust's operands reach cuBLASLt **untouched**: its descriptor already reads the
+row-major buffers as their column-major transposes via TRANSA/TRANSB, so there
+is no input copy at all. Fortran still stages A and B row-major -> column-major,
+because the C bridge builds its layouts with OP_N; giving that side the same
+treatment means a transposed variant in `cublaslt_bridge.c` and was left for
+later. That asymmetry shows up directly in the results.
+
+Per layer: engine fused epilogue **6.93 -> 6.04 ms** (Rust). End to end:
+
+| batch | fortran | fortran (FP32) | rust | rust (FP32) | cupy (FP32) |
+|---|---|---|---|---|---|
+| 1024 | 2498 | 2466 | 3437 | **4093** | 5365 |
+| 4096 | 2822 | 2788 | 3592 | **4411** | 5682 |
+| 16384 | 2866 | 2947 | 3446 | **4127** | 5644 |
+
+**Rust +19-23%, Fortran roughly flat** — the latter consistent with it keeping
+the input staging. Accuracy is bit-for-bit what the FP64 path produced
+(identical relative error at every shape tested, n=7..1024, batch 1..8).
+
+## What is still in the way
+
+Not FP64 any more — the **output transpose**. cuBLASLt's bias epilogue only
+accepts column-major layouts, so D always lands transposed relative to the
+row-major buffer the caller wants back. Measured at this shape:
+
+| | ms |
+|---|---|
+| forced col-major -> row-major transpose of D | 1.30 |
+| straight copy of the same bytes | 0.55 |
+| the bias+ReLU pass the fusion saves | ~1.0 |
+
+So the fusion buys ~1.0 ms and the transpose costs ~1.3 ms. That is the whole
+reason the fused path lands near CuPy's unfused one instead of ahead of it, and
+it is why the FP32 entry point alone does not close the gap.
+
+## D15 — the transpose, removed by layout
+
+Tried the obvious thing: keep the activations column-major. It needed a little
+engine support, not a new kernel — `rs_batched_matmul_bias_f32` gained `b_cm`
+and `c_cm` flags, `lt_plan` gained `b_cm` in its cache key (the descriptor sets
+TRANSB=N and describes B as column-major (k x n) instead of row-major read
+transposed), and the epilogue then writes straight into the caller's F-order
+buffer with no transpose pass at all. The wrapper dispatches on layout: hand
+`batched_matmul_bias_relu` an F-order 2-D activation block and it takes that
+path, returning an F-order result which is itself a valid operand for the next
+layer. Weights stay C-order.
+
+Per layer, (1024 x 1024) @ (1024 x 16384):
+
+| | ms | GFLOPS |
+|---|---|---|
+| cupy FP32 GEMM + bias + relu (no casts) | 5.00 | 6866 |
+| engine fused, exact FP32, **FP64 in/out** | 6.84 | 5024 |
+| engine fused, **FP32 in/out** (D14) | 6.00 | 5730 |
+| engine fused, **FP32 + F-order activations** | **4.90** | **7012** |
+
+The saving is 1.10 ms against a transpose measured at 1.33 ms — the prediction
+held. And at the layer level the fused path is now **ahead of unfused CuPy
+FP32**, which is where it should have been all along.
+
+End to end on the MLP (GFLOPS, Rust):
+
+| batch | cupy (FP32) | rust | rust (FP32) | rust (FP32, F-order) |
+|---|---|---|---|---|
+| 64 | 578 | 644 | 659 | **864** |
+| 256 | 2248 | 1901 | 1943 | **2476** |
+| 4096 | 5683 | 3644 | 4480 | 5255 |
+| 16384 | 5734 | 3488 | 4143 | 5636 |
+
+Ahead of CuPy at small and moderate batches, level (98%) at the largest — the
+remaining difference being the `asfortranarray` conversion, which is inside the
+timed region here but would not exist in a pipeline that already held its
+activations column-major.
+
+Accuracy is unchanged throughout: ~4.2e-7 relative on the logits, **zero**
+prediction flips, identical test accuracy, for every backend in the table.
+
+## D16 — the same path in Fortran, and the bigger jump of the two
+
+`cublaslt_bridge.c` gained a transposed-A variant, keyed in the plan cache by a
+new `ta` field: A row-major (m x k) consumed via `CUBLASLT_MATMUL_DESC_TRANSA =
+OP_T` with layout (k x m), B already column-major (k x n) via OP_N, D
+column-major (m x n) straight into the caller's buffer. Exposed as
+`lt_matmul_bias_fp32_t` / `lt_matmul_bias_relu_fp32_t`, wrapped by
+`py_batched_matmul_bias_relu_f32_t` / `_bias_f32_t`, and dispatched by the same
+layout test the Rust wrapper uses.
+
+`lt_fused_common_f32_t` stages **nothing** — no `wp_*` at all, just the bridge
+call and a sync — where the C-order path stages A and B row-major to
+column-major regardless of dtype *and* transposes the result back.
+
+| one layer, (1024 x 1024) @ (1024 x 16384) | ms | GFLOPS |
+|---|---|---|
+| cupy FP32 GEMM + bias + relu (no casts) | 4.98 | 6902 |
+| **fortran** FP32, C-order activations | 7.68 | 4473 |
+| **fortran** FP32, F-order activations | **4.80** | **7162** |
+| **rust** FP32, C-order activations | 6.08 | 5648 |
+| **rust** FP32, F-order activations | **4.84** | **7093** |
+
+Fortran's is the larger jump — **-37%** against Rust's -20% — because F-order
+removes *both* of its costs at once, the input staging and the output
+transpose, where Rust only ever paid the latter. The two engines end up level,
+as they have on every other op once the formulations match.
+
+End to end on the MLP (GFLOPS):
+
+| batch | cupy (FP32) | fortran | rust | fortran (FP32, F) | rust (FP32, F) |
+|---|---|---|---|---|---|
+| 64 | 581 | 462 | 638 | **862** | **864** |
+| 256 | 2229 | 1406 | 1880 | **2461** | **2482** |
+| 4096 | 5684 | 2744 | 3623 | 5267 | 5252 |
+| 16384 | 5715 | 2902 | 3504 | 5573 | 5498 |
+
+Ahead of CuPy FP32 at small and moderate batches, ~97% of it at the largest —
+the residual being the `asfortranarray` conversion inside the timed region,
+which a pipeline already holding activations column-major would not pay.
+
+Accuracy is untouched by any of it: ~4.2e-7 relative on the logits and **zero**
+prediction flips for all eight backends.
+
+## What is still open
+
+- **Chain several layers in one call**, so intermediate activations never return
+  to the caller at all.
+- The F-order path is single-batch on both engines (`batch == 1`), which is what
+  a per-layer activation block is. Batched F-order would need a stride
+  convention nothing currently asks for.
+
+## The methodological point
+
+The op-level benchmark is six months of careful work and it could not have found
+this, because every cost here is *per call* and it measures one call at a time.
+It took a real model, with layers chained, to expose an API boundary that is
+invisible one operation at a time — and a like-for-like FP32 baseline to make
+the gap visible at all. Against FP64 CuPy the same engines look 13-16x faster.

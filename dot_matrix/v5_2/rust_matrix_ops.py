@@ -98,6 +98,8 @@ class RustMatrixOps:
             "rs_matmul_tc_split": ([u64] * 6 + [i32, u64, i32, i32], i32),
             "rs_batched_matmul": ([u64] * 7 + [i32, i32], i32),
             "rs_batched_matmul_bias": ([u64] * 8 + [i32], i32),
+            # v5.3 FP32-in/FP32-out twin; see _batched_bias
+            "rs_batched_matmul_bias_f32": ([u64] * 8 + [i32, i32, i32], i32),
             "rs_vector_matmul": ([u64] * 4 + [i32], i32),
             "rs_matmul_vector": ([u64] * 4 + [i32], i32),
             "rs_batched_vector_matmul": ([u64] * 5, i32),
@@ -292,7 +294,63 @@ class RustMatrixOps:
     def batched_matmul_tc_split(self, a, b):
         return self._batched(a, b, _BATCH_TC_SPLIT)
 
+    @staticmethod
+    def _all_f32(*arrays):
+        return all(getattr(x, "dtype", None) == np.float32 for x in arrays)
+
+    def _batched_bias_f32(self, a, b, bias, relu):
+        """FP32 in, FP32 out -- no narrowing, no range guard, no widening.
+
+        v5.3. The FP64 entry point converts both operands down and the result
+        back up on every call, which is amortised for one big op but paid per
+        layer in a chained model; `mlp_example_fortran_vs_rust_vs_cupy.ipynb`
+        showed that costing more than the fused epilogue saves. Here the
+        operands reach cuBLASLt untouched.
+
+        **Layout follows the activation block.** cuBLASLt's bias epilogue only
+        emits column-major, so a C-order caller needs a transpose pass on the
+        way out -- measured at ~1.3 ms for (1024 x 16384) f32, against the
+        ~1.0 ms bias+ReLU pass the fusion saves, which is most of why the fused
+        path did not beat unfused CuPy. Hand `b` in as an **F-order** 2-D array
+        and that pass disappears: B is described column-major with TRANSB=N,
+        the epilogue writes straight into an F-order result, and the result is
+        itself a valid F-order `b` for the next layer. Weights stay C-order
+        either way.
+        """
+        two_d = getattr(b, "ndim", None) == 2
+        b_cm = bool(two_d and getattr(b, "flags", None) is not None
+                    and b.flags.f_contiguous and not b.flags.c_contiguous)
+
+        a_g = cp.ascontiguousarray(cp.asarray(a, dtype=cp.float32))
+        bias_g = cp.ascontiguousarray(cp.asarray(bias, dtype=cp.float32))
+        b_g = cp.asarray(b, dtype=cp.float32) if b_cm else cp.ascontiguousarray(cp.asarray(b, dtype=cp.float32))
+
+        lead = a_g.shape[:-2]
+        batch = int(np.prod(lead)) if lead else 1
+        m, k = a_g.shape[-2:]
+        n = b_g.shape[-1]
+        if bias_g.shape != (m,):
+            raise ValueError(f"bias must have shape ({m},), got {bias_g.shape}")
+        if b_cm and batch != 1:
+            raise ValueError("F-order activations are only supported for a single batch")
+        a3 = a_g.reshape(batch, m, k)
+        b3 = b_g if b_cm else b_g.reshape(batch, k, n)
+        c = (cp.empty((m, n), dtype=cp.float32, order="F") if b_cm
+             else cp.empty((batch, m, n), dtype=cp.float32))
+        self._check(
+            self.lib.rs_batched_matmul_bias_f32(
+                a3.data.ptr, b3.data.ptr, bias_g.data.ptr, c.data.ptr,
+                batch, m, k, n, int(relu), int(b_cm), int(b_cm)),
+            "rs_batched_matmul_bias_f32",
+        )
+        if b_cm:
+            return self._out(c, a)
+        return self._out(c.reshape((*lead, m, n)), a)
+
     def _batched_bias(self, a, b, bias, relu):
+        # float32 in -> float32 out, through the v5.3 conversion-free path.
+        if self._all_f32(a, b, bias):
+            return self._batched_bias_f32(a, b, bias, relu)
         a_g, b_g, bias_g = self._dev(a), self._dev(b), self._dev(bias)
         lead = a_g.shape[:-2]
         batch = int(np.prod(lead)) if lead else 1
